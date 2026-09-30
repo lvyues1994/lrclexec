@@ -1,0 +1,7 @@
+add_executable(navigation_example navigation.cpp)
+target_link_libraries(navigation_example PRIVATE lrclexec::lrclexec example_interfaces::example_interfaces__rosidl_typesupport_cpp)
+if(LRCLEXEC_BUILD_TESTS)
+    add_test(NAME navigation_example COMMAND navigation_example)
+    set_tests_properties(navigation_example PROPERTIES TIMEOUT 30
+        ENVIRONMENT "ROS_DOMAIN_ID=212;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-example-logs")
+endif()

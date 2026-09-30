@@ -1,0 +1,16 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {"name": "base", "hidden": true, "generator": "Ninja", "binaryDir": "${sourceDir}/build/${presetName}", "cacheVariables": {"CMAKE_EXPORT_COMPILE_COMMANDS": true}},
+    {"name": "debug", "inherits": "base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}},
+    {"name": "asan", "inherits": "debug", "cacheVariables": {"LRCLEXEC_SANITIZE": true}}
+  ],
+  "buildPresets": [
+    {"name": "debug", "configurePreset": "debug"},
+    {"name": "asan", "configurePreset": "asan"}
+  ],
+  "testPresets": [
+    {"name": "debug", "configurePreset": "debug", "output": {"outputOnFailure": true}},
+    {"name": "asan", "configurePreset": "asan", "output": {"outputOnFailure": true}}
+  ]
+}
