@@ -1,6 +1,6 @@
 # MuJoCo + Nav2 差速底盘
 
-用真实 Nav2 planner/controller 验证 `examples/nav2/Navigator` 的 sender/receiver 任务组合。程序直接使用 MuJoCo C SDK，无界面运行；轮速执行器通过接触与摩擦驱动底盘，位置由物理仿真产生。
+用真实 Nav2 planner/controller 验证 `examples/nav2/Navigator` 的 sender/receiver 任务组合。程序直接使用 MuJoCo C SDK，默认无界面运行，可启用原生窗口；轮速执行器通过接触与摩擦驱动底盘，位置由物理仿真产生。
 
 `mujoco_bridge` 接收 `/cmd_vel`，发布 `/clock`、`/odom`、TF、`/scan` 和 `/map`。`mujoco_navigator` 等待 Nav2 生命周期进入 ACTIVE，然后调用 `ComputePathToPose` / `FollowPath`，每秒重规划一次。结束或取消后，任务排空，再关闭 Nav2，最后关闭仿真。
 
@@ -35,6 +35,26 @@ ctest --preset debug -R '^mujoco_'
 `LRCLEXEC_BUILD_MUJOCO_SIM` 默认关闭；仿真目标只在构建树中使用，不进入通用库的安装导出。若已有完整 Nav2，可将两个 Nav2 前缀参数改为对应的 Jazzy 安装目录。MuJoCo SDK 可通过 `LRCLEXEC_MUJOCO_ROOT` 或 `mujoco::mujoco` CMake 包提供；本机路径指向已有 SDK，仅使用其中的头文件和动态库。
 
 ASan/UBSan 使用相同配置参数，将 preset 改为 `asan-clang`，然后运行 `cmake --build --preset asan-clang -j3` 和 `ctest --preset asan-clang`。该配置需要 Clang；MuJoCo 3.8.0 的 sanitizer 头文件含 GCC 13 不接受的属性位置。检查覆盖本项目 C++ 代码；预编译的 MuJoCo/Nav2 依赖没有重新插桩。
+
+## MuJoCo 窗口
+
+完成上面的构建后，下载可选 GLFW 依赖并启用窗口：
+
+```bash
+UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
+  simulation/mujoco/fetch_nav2.py --directory build/nav2 --viewer
+cmake --preset debug -DLRCLEXEC_MUJOCO_VIEWER=ON \
+  -DLRCLEXEC_GLFW_ROOT="$PWD/build/nav2/root/usr"
+cmake --build --preset debug -j3
+UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
+  simulation/mujoco/run.py --build build/debug \
+  --nav2-prefix build/nav2/root/opt/ros/jazzy \
+  --logs build/mujoco-runs/gui --view --case obstacle
+```
+
+窗口显示蓝色底盘、橙色障碍和绿色目标。左键拖动旋转视角，右键拖动平移，滚轮缩放。导航完成后窗口保持打开；按 Esc 或关闭窗口退出。若运动中关闭，脚本先取消并排空 Action、等待停稳，再关闭 Nav2 和仿真。`--view` 默认选择绕障场景，也可指定 `--case straight`；每次显示一个场景。
+
+渲染在主线程读取物理状态快照，使用独立 MuJoCo Data；窗口交互只改变相机。GLFW/MuJoCo GPU 资源在窗口销毁前释放。可视化回归日志中另存最新的 `viewer.ppm` 画面。本机窗口验证使用 X11 `DISPLAY=:1`、GLFW 3.3.10。
 
 ## 运行和检查
 

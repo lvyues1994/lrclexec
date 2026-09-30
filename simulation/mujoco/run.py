@@ -1,4 +1,4 @@
-"""Run a headless MuJoCo/Nav2 closed-loop regression, preserving logs on failure."""
+"""Run MuJoCo/Nav2 navigation, optionally showing the native MuJoCo window."""
 
 import argparse
 import json
@@ -20,6 +20,20 @@ def records(path):
         except json.JSONDecodeError:
             pass  # The writer may be in the middle of its final line.
     return rows
+
+
+def last_record(path):
+    if not path.exists():
+        return {}
+    with path.open("rb") as stream:
+        stream.seek(max(0, path.stat().st_size - 2048))
+        lines = stream.read().splitlines()
+    for line in reversed(lines):
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return {}
 
 
 class Processes:
@@ -118,7 +132,7 @@ def run_case(args, case, domain):
     # Old telemetry must not satisfy this run's readiness or motion predicates.
     telemetry = directory / "physics.jsonl"
     telemetry.unlink(missing_ok=True)
-    for name in ("result.json", "exit.json"):
+    for name in ("result.json", "exit.json", "viewer.ppm", "viewer.ppm.tmp"):
         (directory / name).unlink(missing_ok=True)
     prefix = args.nav2_prefix.resolve()
     environment = os.environ.copy()
@@ -140,22 +154,35 @@ def run_case(args, case, domain):
     executables = args.build.resolve() / "simulation/mujoco"
     outcome = None
     failure = None
+    user_closed = False
+    target = 1.0 if case == "straight" else 4.0
+
+    def window_closed():
+        return args.view and bool(last_record(telemetry).get("viewer_closed", False))
+
     try:
-        processes.start(
-            "bridge",
-            [
-                str(executables / "mujoco_bridge"),
-                "--ros-args",
-                "-p",
-                f"model:={source / 'scene.xml'}",
-                "-p",
-                f"telemetry:={telemetry}",
-                "-p",
-                f"map_includes_obstacle:={'false' if case == 'obstacle' else 'true'}",
-            ],
-        )
+        bridge_args = [
+            str(executables / "mujoco_bridge"),
+            "--ros-args",
+            "-p",
+            f"model:={source / 'scene.xml'}",
+            "-p",
+            f"telemetry:={telemetry}",
+            "-p",
+            f"map_includes_obstacle:={'false' if case == 'obstacle' else 'true'}",
+            "-p",
+            f"viewer:={'true' if args.view else 'false'}",
+            "-p",
+            f"viewer_target_x:={target}",
+        ]
+        if args.view:
+            bridge_args.extend(["-p", f"viewer_capture:={directory / 'viewer.ppm'}"])
+        processes.start("bridge", bridge_args)
         wait_until(
-            lambda: len(records(telemetry)) >= 2, 5, "bridge readiness", processes
+            lambda: len(records(telemetry)) >= 2,
+            20 if args.view else 5,
+            "bridge readiness",
+            processes,
         )
         for name, package, executable in (
             ("planner", "nav2_planner", "planner_server"),
@@ -173,7 +200,6 @@ def run_case(args, case, domain):
             if name == "manager":
                 command.extend(["-r", "__node:=lifecycle_manager_navigation"])
             processes.start(name, command)
-        target = 1.0 if case == "straight" else 4.0
         navigator = processes.start(
             "navigator",
             [
@@ -193,19 +219,38 @@ def run_case(args, case, domain):
             os.killpg(navigator.pid, signal.SIGINT)
         elif case == "cancel":
             wait_until(
-                lambda: any(
-                    row["x"] > 0.2 and abs(row["v"]) > 0.05
-                    for row in records(telemetry)
+                lambda: (
+                    window_closed()
+                    or any(
+                        row["x"] > 0.2 and abs(row["v"]) > 0.05
+                        for row in records(telemetry)
+                    )
                 ),
                 30,
                 "actual robot motion before cancellation",
                 processes,
             )
-            os.killpg(navigator.pid, signal.SIGINT)
+            if not window_closed():
+                os.killpg(navigator.pid, signal.SIGINT)
 
         def navigation_finished():
+            nonlocal user_closed
             if any(row["collision"] for row in records(telemetry)):
                 raise RuntimeError("robot collided during navigation")
+            if window_closed():
+                user_closed = True
+                # SignalStop is installed before this flushed readiness marker.
+                wait_until(
+                    lambda: (
+                        "WAITING_FOR_NAV2" in (directory / "navigator.log").read_text()
+                        or navigator.poll() is not None
+                    ),
+                    5,
+                    "navigator signal readiness before window cancellation",
+                    processes,
+                    allow_navigator_exit=True,
+                )
+                processes.stop("navigator")
             return navigator.poll() is not None
 
         wait_until(
@@ -218,6 +263,9 @@ def run_case(args, case, domain):
         output = (directory / "navigator.log").read_text()
         canceled = case in ("cancel", "startup-cancel")
         terminal = "STOPPED" if canceled else "SUCCEEDED"
+        if user_closed:
+            terminal = "SUCCEEDED" if "SUCCEEDED" in output else "STOPPED"
+            canceled = terminal == "STOPPED"
         if (
             navigator.returncode != 0
             or terminal not in output
@@ -247,7 +295,11 @@ def run_case(args, case, domain):
             math.hypot(last["x"] - target, last["y"]) > 0.15 or abs(last["yaw"]) > 0.18
         ):
             raise RuntimeError(f"Action success did not match physical goal: {last}")
-        if case == "obstacle" and max(abs(row["y"]) for row in rows) < 0.55:
+        if (
+            case == "obstacle"
+            and not canceled
+            and max(abs(row["y"]) for row in rows) < 0.55
+        ):
             raise RuntimeError("robot did not physically go around scan-only obstacle")
         outcome = {
             "case": case,
@@ -255,6 +307,20 @@ def run_case(args, case, domain):
             "final": last,
             "max_lateral_offset": max(abs(row["y"]) for row in rows),
         }
+        if args.view and not user_closed:
+            print(
+                f"{terminal}: robot stopped. Close the MuJoCo window to exit.",
+                flush=True,
+            )
+            wait_until(
+                window_closed,
+                math.inf,
+                "MuJoCo window closure",
+                processes,
+                allow_navigator_exit=True,
+            )
+        if args.view:
+            outcome["closed_by_user"] = True
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - Save failed runs.
         failure = error
     finally:
@@ -288,16 +354,22 @@ parser.add_argument("--build", type=Path, required=True)
 parser.add_argument("--nav2-prefix", type=Path, required=True)
 parser.add_argument("--logs", type=Path, required=True)
 parser.add_argument(
+    "--view", action="store_true", help="show MuJoCo and keep the window open"
+)
+parser.add_argument(
     "--case",
     choices=["all", "straight", "obstacle", "cancel", "startup-cancel"],
-    default="all",
+    default=None,
 )
 parser.add_argument("--domain", type=int, default=220)
 arguments = parser.parse_args()
+selected = arguments.case or ("obstacle" if arguments.view else "all")
+if arguments.view and selected == "all":
+    parser.error("--view runs one case; use --case obstacle or --case straight")
 cases = (
     ["straight", "obstacle", "cancel", "startup-cancel"]
-    if arguments.case == "all"
-    else [arguments.case]
+    if selected == "all"
+    else [selected]
 )
 if arguments.domain < 0 or arguments.domain + len(cases) - 1 > 232:
     parser.error("each DDS domain must be between 0 and 232")

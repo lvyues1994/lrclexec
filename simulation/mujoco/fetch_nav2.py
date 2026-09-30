@@ -17,19 +17,23 @@ ROOTS = [
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--directory", type=Path, required=True)
+parser.add_argument(
+    "--viewer", action="store_true", help="also download GLFW for the native window"
+)
 args = parser.parse_args()
+roots = ROOTS + (["libglfw3-dev"] if args.viewer else [])
 directory = args.directory.resolve()
 debs = directory / "debs"
 debs.mkdir(parents=True, exist_ok=True)
 plan = subprocess.run(
-    ["apt-get", "--simulate", "--no-install-recommends", "install", *ROOTS],
+    ["apt-get", "--simulate", "--no-install-recommends", "install", *roots],
     text=True,
     capture_output=True,
     check=True,
 ).stdout
 packages = dict(re.findall(r"^Inst (\S+)(?: \[[^\]]+\])? \((\S+)", plan, re.MULTILINE))
 # Include already installed roots so the overlay's executables are self-contained.
-for package in ROOTS:
+for package in roots:
     if package not in packages:
         policy = subprocess.run(
             ["apt-cache", "policy", package], text=True, capture_output=True, check=True

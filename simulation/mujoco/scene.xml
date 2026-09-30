@@ -2,15 +2,16 @@
   <compiler angle="radian"/>
   <option timestep="0.002" integrator="implicitfast" cone="elliptic"/>
   <default><geom friction="1 0.01 0.001"/>
-    <default class="robot"><geom group="1"/></default>
+    <default class="robot"><geom group="1" rgba=".1 .4 .85 1"/></default>
   </default>
   <worldbody>
-    <geom name="floor" type="plane" size="10 10 .1"/>
+    <light pos="2 -1 4" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="10 10 .1" rgba=".2 .23 .27 1"/>
     <geom name="west" type="box" pos="-2 0 .5" size=".05 3 .5"/>
     <geom name="east" type="box" pos="6 0 .5" size=".05 3 .5"/>
     <geom name="north" type="box" pos="2 3 .5" size="4 .05 .5"/>
     <geom name="south" type="box" pos="2 -3 .5" size="4 .05 .5"/>
-    <geom name="obstacle" type="box" group="2" pos="2 0 .4" size=".3 .3 .4"/>
+    <geom name="obstacle" type="box" group="2" pos="2 0 .4" size=".3 .3 .4" rgba=".95 .45 .12 1"/>
     <body name="base_link" pos="0 0 .1" childclass="robot">
       <freejoint name="floating_base"/>
       <geom name="chassis" type="box" size=".18 .13 .045" mass="2"/>

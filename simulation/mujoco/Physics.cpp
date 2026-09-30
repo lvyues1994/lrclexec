@@ -97,6 +97,7 @@ struct PhysicsImpl final : Physics {
                 {velocity[3], velocity[2]},
                 obstacleContact};
     }
+    SceneState scene() const override { return {{data->qpos, data->qpos + model->nq}, data->time}; }
     Scan scan() const override {
         auto scan =
             Scan{std::vector<float>(360), static_cast<float>(-pi), static_cast<float>(2 * pi / 360), 8.f};

@@ -41,12 +41,17 @@ struct Map {
     double originX;
     double originY;
 };
+struct SceneState {
+    std::vector<double> positions;
+    double time;
+};
 struct Physics {
     virtual ~Physics() = default;
     virtual void step(Velocity command) = 0;
     virtual State state() const = 0;
     virtual Scan scan() const = 0;
     virtual Map map(bool includeObstacle) const = 0;
+    virtual SceneState scene() const = 0;
 };
 std::unique_ptr<Physics> makePhysics(std::string const &modelFile);
 

@@ -1,4 +1,5 @@
 #include "Physics.h"
+#include "Viewer.h"
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -28,9 +29,11 @@ geometry_msgs::msg::TransformStamped transform(char const *parent, char const *c
 
 class Bridge {
   public:
-    Bridge(rclcpp::Node &node_, std::unique_ptr<simulation::Physics> physics_)
+    Bridge(rclcpp::Node &node_, std::unique_ptr<simulation::Physics> physics_,
+           std::unique_ptr<simulation::Viewer> viewer_)
         : node{node_}, physics{std::move(physics_)},
-          telemetry{node.declare_parameter<std::string>("telemetry", "physics.jsonl")} {
+          telemetry{node.declare_parameter<std::string>("telemetry", "physics.jsonl")},
+          viewer{std::move(viewer_)} {
         if (not telemetry)
             throw std::runtime_error{"cannot open physics telemetry"};
         telemetry << std::setprecision(9);
@@ -123,15 +126,20 @@ class Bridge {
             message.ranges = std::move(source.ranges);
             scan->publish(message);
         }
+        if (viewer and not viewerClosed and ticks % 3 == 0)
+            viewerClosed = not viewer->present(physics->scene());
         if (ticks % 20 == 0)
             telemetry << "{\"time\":" << state.time << ",\"x\":" << state.x << ",\"y\":" << state.y
                       << ",\"yaw\":" << state.yaw << ",\"v\":" << state.velocity.forward
                       << ",\"w\":" << state.velocity.yawRate << ",\"collision\":" << state.obstacleContact
-                      << ",\"command_v\":" << effective.forward << "}" << std::endl;
+                      << ",\"command_v\":" << effective.forward << ",\"viewer_closed\":" << viewerClosed
+                      << "}" << std::endl;
     }
     rclcpp::Node &node;
     std::unique_ptr<simulation::Physics> physics;
     std::ofstream telemetry;
+    std::unique_ptr<simulation::Viewer> viewer;
+    bool viewerClosed = false;
     simulation::Velocity command;
     std::chrono::steady_clock::time_point receivedAt{};
     int ticks = 0;
@@ -154,7 +162,15 @@ int main(int argc, char **argv) {
     auto status = 0;
     try {
         auto node = std::make_shared<rclcpp::Node>("mujoco_bridge");
-        auto bridge = Bridge{*node, simulation::makePhysics(node->declare_parameter<std::string>("model"))};
+        auto const model = node->declare_parameter<std::string>("model");
+        auto physics = simulation::makePhysics(model);
+        auto viewer = std::unique_ptr<simulation::Viewer>{};
+        if (node->declare_parameter<bool>("viewer", false))
+            viewer =
+                simulation::makeViewer({model, node->declare_parameter<std::string>("viewer_capture", ""),
+                                        node->declare_parameter<double>("viewer_target_x", 4.0),
+                                        node->declare_parameter<double>("viewer_target_y", 0.0)});
+        auto bridge = Bridge{*node, std::move(physics), std::move(viewer)};
         auto executor = rclcpp::executors::SingleThreadedExecutor{};
         executor.add_node(node);
         auto scope = lexec::counting_scope{};
