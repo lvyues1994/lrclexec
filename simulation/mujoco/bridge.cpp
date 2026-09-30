@@ -1,0 +1,170 @@
+#include "Physics.h"
+#include <chrono>
+#include <cmath>
+#include <fstream>
+#include <geometry_msgs/msg/twist.hpp>
+#include <iomanip>
+#include <lrclexec/SignalStop.h>
+#include <lrclexec/SpinWithScope.h>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
+
+using namespace std::chrono_literals;
+namespace {
+
+geometry_msgs::msg::TransformStamped transform(char const *parent, char const *child,
+                                               builtin_interfaces::msg::Time const &stamp) {
+    auto result = geometry_msgs::msg::TransformStamped{};
+    result.header.stamp = stamp;
+    result.header.frame_id = parent;
+    result.child_frame_id = child;
+    result.transform.rotation.w = 1;
+    return result;
+}
+
+class Bridge {
+  public:
+    Bridge(rclcpp::Node &node_, std::unique_ptr<simulation::Physics> physics_)
+        : node{node_}, physics{std::move(physics_)},
+          telemetry{node.declare_parameter<std::string>("telemetry", "physics.jsonl")} {
+        if (not telemetry)
+            throw std::runtime_error{"cannot open physics telemetry"};
+        telemetry << std::setprecision(9);
+        clock = node.create_publisher<rosgraph_msgs::msg::Clock>("clock", 10);
+        odom = node.create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+        scan = node.create_publisher<sensor_msgs::msg::LaserScan>("scan", rclcpp::SensorDataQoS{});
+        tf = node.create_publisher<tf2_msgs::msg::TFMessage>("tf", 100);
+        staticTf =
+            node.create_publisher<tf2_msgs::msg::TFMessage>("tf_static", rclcpp::QoS{1}.transient_local());
+        map = node.create_publisher<nav_msgs::msg::OccupancyGrid>("map", rclcpp::QoS{1}.transient_local());
+        velocity = node.create_subscription<geometry_msgs::msg::Twist>(
+            "cmd_vel", 10, [this](geometry_msgs::msg::Twist const &message) {
+                if (not std::isfinite(message.linear.x) or not std::isfinite(message.angular.z))
+                    return;
+                command = {message.linear.x, message.angular.z};
+                receivedAt = std::chrono::steady_clock::now();
+            });
+        publishMap(node.declare_parameter<bool>("map_includes_obstacle", true));
+        auto fixed = tf2_msgs::msg::TFMessage{};
+        auto const zeroStamp = builtin_interfaces::msg::Time{};
+        fixed.transforms.push_back(transform("map", "odom", zeroStamp));
+        fixed.transforms.push_back(transform("base_link", "laser", zeroStamp));
+        fixed.transforms.back().transform.translation.z = .2;
+        staticTf->publish(fixed);
+        timer = node.create_wall_timer(10ms, [this] { tick(); });
+    }
+    Bridge(Bridge const &) = delete;
+    Bridge &operator=(Bridge const &) = delete;
+    void stop() {
+        timer->cancel();
+        for (int i = 0; i < 250; ++i)
+            physics->step({});
+    }
+
+  private:
+    void publishMap(bool const includeObstacle) {
+        auto const source = physics->map(includeObstacle);
+        auto message = nav_msgs::msg::OccupancyGrid{};
+        message.header.frame_id = "map";
+        message.info.resolution = static_cast<float>(source.resolution);
+        message.info.width = source.width;
+        message.info.height = source.height;
+        message.info.origin.position.x = source.originX;
+        message.info.origin.position.y = source.originY;
+        message.info.origin.orientation.w = 1;
+        message.data = source.cells;
+        map->publish(message);
+    }
+    void tick() {
+        auto effective = command;
+        if (std::chrono::steady_clock::now() - receivedAt > 300ms)
+            effective = {};
+        for (int i = 0; i < 5; ++i)
+            physics->step(effective);
+        auto const state = physics->state();
+        builtin_interfaces::msg::Time const stamp = rclcpp::Time{static_cast<std::int64_t>(state.time * 1e9)};
+        auto time = rosgraph_msgs::msg::Clock{};
+        time.clock = stamp;
+        clock->publish(time);
+        auto pose = transform("odom", "base_link", stamp);
+        pose.transform.translation.x = state.x;
+        pose.transform.translation.y = state.y;
+        pose.transform.translation.z = state.z;
+        pose.transform.rotation.x = state.orientation.x;
+        pose.transform.rotation.y = state.orientation.y;
+        pose.transform.rotation.z = state.orientation.z;
+        pose.transform.rotation.w = state.orientation.w;
+        tf->publish(tf2_msgs::msg::TFMessage{}.set__transforms({pose}));
+        auto odometry = nav_msgs::msg::Odometry{};
+        odometry.header = pose.header;
+        odometry.child_frame_id = "base_link";
+        odometry.pose.pose.position.x = state.x;
+        odometry.pose.pose.position.y = state.y;
+        odometry.pose.pose.position.z = state.z;
+        odometry.pose.pose.orientation = pose.transform.rotation;
+        odometry.twist.twist.linear.x = state.velocity.forward;
+        odometry.twist.twist.angular.z = state.velocity.yawRate;
+        odom->publish(odometry);
+        if (++ticks % 10 == 0) {
+            auto source = physics->scan();
+            auto message = sensor_msgs::msg::LaserScan{};
+            message.header.stamp = stamp;
+            message.header.frame_id = "laser";
+            message.angle_min = source.angleMin;
+            message.angle_increment = source.angleStep;
+            message.angle_max = source.angleMin + (source.ranges.size() - 1) * source.angleStep;
+            message.range_min = .05f;
+            message.range_max = source.rangeMax;
+            message.scan_time = .1f;
+            message.ranges = std::move(source.ranges);
+            scan->publish(message);
+        }
+        if (ticks % 20 == 0)
+            telemetry << "{\"time\":" << state.time << ",\"x\":" << state.x << ",\"y\":" << state.y
+                      << ",\"yaw\":" << state.yaw << ",\"v\":" << state.velocity.forward
+                      << ",\"w\":" << state.velocity.yawRate << ",\"collision\":" << state.obstacleContact
+                      << ",\"command_v\":" << effective.forward << "}" << std::endl;
+    }
+    rclcpp::Node &node;
+    std::unique_ptr<simulation::Physics> physics;
+    std::ofstream telemetry;
+    simulation::Velocity command;
+    std::chrono::steady_clock::time_point receivedAt{};
+    int ticks = 0;
+    rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom;
+    rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map;
+    rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf, staticTf;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity;
+    rclcpp::TimerBase::SharedPtr timer;
+};
+} // namespace
+
+int main(int argc, char **argv) {
+    auto stop = lexec::inplace_stop_source{};
+    auto signals = lrclexec::SignalStop{stop};
+    auto options = rclcpp::InitOptions{};
+    options.shutdown_on_signal = false;
+    rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
+    auto status = 0;
+    try {
+        auto node = std::make_shared<rclcpp::Node>("mujoco_bridge");
+        auto bridge = Bridge{*node, simulation::makePhysics(node->declare_parameter<std::string>("model"))};
+        auto executor = rclcpp::executors::SingleThreadedExecutor{};
+        executor.add_node(node);
+        auto scope = lexec::counting_scope{};
+        lrclexec::spin_with_scope(executor, scope, stop.get_token());
+        bridge.stop();
+        status = signals.error() ? 1 : 0;
+    } catch (std::exception const &error) {
+        std::cerr << error.what() << '\n';
+        status = 1;
+    }
+    rclcpp::shutdown();
+    return status;
+}

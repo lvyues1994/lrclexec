@@ -3,14 +3,17 @@
   "configurePresets": [
     {"name": "base", "hidden": true, "generator": "Ninja", "binaryDir": "${sourceDir}/build/${presetName}", "cacheVariables": {"CMAKE_EXPORT_COMPILE_COMMANDS": true}},
     {"name": "debug", "inherits": "base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}},
-    {"name": "asan", "inherits": "debug", "cacheVariables": {"LRCLEXEC_SANITIZE": true}}
+    {"name": "asan", "inherits": "debug", "cacheVariables": {"LRCLEXEC_SANITIZE": true}},
+    {"name": "asan-clang", "inherits": "asan", "cacheVariables": {"CMAKE_CXX_COMPILER": "clang++"}}
   ],
   "buildPresets": [
     {"name": "debug", "configurePreset": "debug"},
-    {"name": "asan", "configurePreset": "asan"}
+    {"name": "asan", "configurePreset": "asan"},
+    {"name": "asan-clang", "configurePreset": "asan-clang"}
   ],
   "testPresets": [
     {"name": "debug", "configurePreset": "debug", "output": {"outputOnFailure": true}},
-    {"name": "asan", "configurePreset": "asan", "output": {"outputOnFailure": true}}
+    {"name": "asan", "configurePreset": "asan", "output": {"outputOnFailure": true}},
+    {"name": "asan-clang", "configurePreset": "asan-clang", "output": {"outputOnFailure": true}}
   ]
 }

@@ -1,0 +1,59 @@
+set(LRCLEXEC_MUJOCO_ROOT "" CACHE PATH "MuJoCo SDK or Python wheel root")
+find_package(mujoco CONFIG QUIET)
+if(NOT TARGET mujoco::mujoco)
+    find_path(LRCLEXEC_MUJOCO_INCLUDE_DIR mujoco/mujoco.h HINTS "${LRCLEXEC_MUJOCO_ROOT}/include" REQUIRED)
+    find_library(LRCLEXEC_MUJOCO_LIBRARY NAMES mujoco libmujoco.so.3.8.0
+        HINTS "${LRCLEXEC_MUJOCO_ROOT}" "${LRCLEXEC_MUJOCO_ROOT}/lib" REQUIRED)
+    add_library(mujoco::mujoco SHARED IMPORTED)
+    set_target_properties(mujoco::mujoco PROPERTIES IMPORTED_LOCATION "${LRCLEXEC_MUJOCO_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${LRCLEXEC_MUJOCO_INCLUDE_DIR}")
+endif()
+add_library(mujoco_physics STATIC Physics.cpp)
+target_include_directories(mujoco_physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(mujoco_physics PUBLIC cxx_std_17)
+target_link_libraries(mujoco_physics PRIVATE mujoco::mujoco)
+target_compile_options(mujoco_physics PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+if(LRCLEXEC_SANITIZE)
+    target_compile_options(mujoco_physics PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(mujoco_physics PUBLIC -fsanitize=address,undefined)
+endif()
+find_package(rosgraph_msgs REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(lifecycle_msgs REQUIRED)
+add_executable(mujoco_bridge bridge.cpp)
+target_link_libraries(mujoco_bridge PRIVATE mujoco_physics lrclexec::lrclexec
+    rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp tf2_msgs::tf2_msgs__rosidl_typesupport_cpp
+    sensor_msgs::sensor_msgs__rosidl_typesupport_cpp nav_msgs::nav_msgs__rosidl_typesupport_cpp)
+add_executable(mujoco_navigator navigate.cpp)
+target_link_libraries(mujoco_navigator PRIVATE lrclexec_nav2_example
+    lifecycle_msgs::lifecycle_msgs__rosidl_typesupport_cpp)
+if(LRCLEXEC_BUILD_TESTS)
+    add_executable(mujoco_physics_test physics_test.cpp)
+    target_link_libraries(mujoco_physics_test PRIVATE mujoco_physics)
+    file(READ ${CMAKE_CURRENT_SOURCE_DIR}/scene.xml tilted_scene)
+    string(REPLACE "<site name=\"laser\" pos=\"0 0 .2\"/>"
+        "<site name=\"laser\" pos=\"0 0 .2\" euler=\"0 .5235987756 0\"/>" tilted_scene "${tilted_scene}")
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/tilted_scene.xml "${tilted_scene}")
+    add_test(NAME mujoco_physics COMMAND mujoco_physics_test ${CMAKE_CURRENT_SOURCE_DIR}/scene.xml
+        ${CMAKE_CURRENT_BINARY_DIR}/tilted_scene.xml)
+    set_tests_properties(mujoco_physics PROPERTIES TIMEOUT 10)
+    set(LRCLEXEC_NAV2_RUNTIME_PREFIX "" CACHE PATH "Jazzy prefix with the Nav2 runtime nodes")
+    if(LRCLEXEC_NAV2_RUNTIME_PREFIX)
+        find_program(UV_EXECUTABLE uv REQUIRED)
+        foreach(case IN ITEMS straight obstacle cancel startup-cancel)
+            add_test(NAME mujoco_nav2_${case} COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
+                ${CMAKE_CURRENT_SOURCE_DIR}/run.py --build ${PROJECT_BINARY_DIR}
+                --nav2-prefix ${LRCLEXEC_NAV2_RUNTIME_PREFIX}
+                --logs ${PROJECT_BINARY_DIR}/mujoco-runs --case ${case})
+            # The harness bounds readiness, motion, completion, stop and each child shutdown.
+            set_tests_properties(mujoco_nav2_${case} PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
+                ENVIRONMENT "UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+            if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
+                set_tests_properties(mujoco_nav2_${case} PROPERTIES
+                    TIMEOUT_SIGNAL_NAME SIGINT TIMEOUT_SIGNAL_GRACE_PERIOD 60)
+            endif()
+        endforeach()
+    endif()
+endif()

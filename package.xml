@@ -11,5 +11,10 @@
   <depend>example_interfaces</depend>
   <exec_depend>nav2_msgs</exec_depend>
   <test_depend>nav2_msgs</test_depend>
+  <test_depend>rosgraph_msgs</test_depend>
+  <test_depend>tf2_msgs</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>lifecycle_msgs</test_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

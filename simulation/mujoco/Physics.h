@@ -1,0 +1,53 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace simulation {
+
+struct Velocity {
+    double forward = 0;
+    double yawRate = 0;
+};
+struct Orientation {
+    double w;
+    double x;
+    double y;
+    double z;
+};
+struct State {
+    double time;
+    double x;
+    double y;
+    double yaw;
+    double z;
+    Orientation orientation;
+    Velocity velocity;
+    bool obstacleContact;
+};
+struct Scan {
+    std::vector<float> ranges;
+    float angleMin;
+    float angleStep;
+    float rangeMax;
+};
+struct Map {
+    std::vector<std::int8_t> cells;
+    unsigned width;
+    unsigned height;
+    double resolution;
+    double originX;
+    double originY;
+};
+struct Physics {
+    virtual ~Physics() = default;
+    virtual void step(Velocity command) = 0;
+    virtual State state() const = 0;
+    virtual Scan scan() const = 0;
+    virtual Map map(bool includeObstacle) const = 0;
+};
+std::unique_ptr<Physics> makePhysics(std::string const &modelFile);
+
+} // namespace simulation

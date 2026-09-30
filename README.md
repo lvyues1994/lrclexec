@@ -149,10 +149,12 @@ LD_LIBRARY_PATH="$NAV2_PREFIX/lib:$LD_LIBRARY_PATH" \
   ./build/debug/examples/nav2/nav2_navigation_example
 ```
 
-导航逻辑使用 co2 的 `while` 协程循环，避免递归 sender 链随重规划次数累计。它检查 Action 终态与 Nav2 `error_code`，保留阶段、协议错误种类、业务错误码和消息；遇到错误直接收束。规划器、控制器和检查器的插件 ID 由 `Resources` 配置。该逻辑仍是可选示例，未接入真实 Nav2 栈或机器人。
+导航逻辑使用 co2 的 `while` 协程循环，避免递归 sender 链随重规划次数累计。它检查 Action 终态与 Nav2 `error_code`，保留阶段、协议错误种类、业务错误码和消息；遇到错误直接收束。规划器、控制器和检查器的插件 ID 由 `Resources` 配置。
+
+[MuJoCo 差速底盘示例](simulation/mujoco/README.md) 将同一导航逻辑接入真实 Nav2 planner/controller，使用轮子接触动力学、激光和真值里程计完成无界面导航。可选开关 `LRCLEXEC_BUILD_MUJOCO_SIM=ON` 默认关闭。回归检查直达、激光发现障碍后绕行、运动中取消及启动阶段取消，并核对物理停稳和进程正常退出；构建和运行步骤见示例说明。
 
 回归覆盖定时器到期/取消竞争、接受前取消、拒绝与 abort 载荷、超时分支排空、投递失败、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join；还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
 
-CTest 使用本机 DDS 域 211–216。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
+基础 CTest 使用本机 DDS 域 211–216；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
 
 目前只提供 Action 结果通道；feedback、Service、Topic、ROS LifecycleNode、仿真时间定时器和实验性 EventsExecutor 尚未适配。
