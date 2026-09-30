@@ -4,3 +4,24 @@ target_compile_options(lrclexec_tests PRIVATE -Wall -Wextra -Wpedantic -Werror=r
 add_test(NAME lrclexec_integration COMMAND lrclexec_tests)
 set_tests_properties(lrclexec_integration PROPERTIES TIMEOUT 60
     ENVIRONMENT "ROS_DOMAIN_ID=211;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-test-logs")
+
+add_executable(lrclexec_signal_unit signal_unit.cpp)
+target_link_libraries(lrclexec_signal_unit PRIVATE lrclexec::lrclexec)
+add_test(NAME signal_mask_lifetime COMMAND lrclexec_signal_unit)
+set_tests_properties(signal_mask_lifetime PROPERTIES TIMEOUT 10)
+
+add_executable(lrclexec_shutdown_fixture shutdown_fixture.cpp)
+target_link_libraries(lrclexec_shutdown_fixture PRIVATE lrclexec::lrclexec
+    example_interfaces::example_interfaces__rosidl_typesupport_cpp)
+find_program(UV_EXECUTABLE uv REQUIRED)
+add_test(NAME signal_scope_shutdown COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
+    ${CMAKE_CURRENT_SOURCE_DIR}/signal_shutdown.py $<TARGET_FILE:lrclexec_shutdown_fixture>)
+set_tests_properties(signal_scope_shutdown PROPERTIES TIMEOUT 30
+    ENVIRONMENT "ROS_DOMAIN_ID=213;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-shutdown-logs;UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+if(LRCLEXEC_INSTALL AND LRCLEXEC_BUNDLE_LEXEC_HEADERS)
+    add_test(NAME installed_package_consumer COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
+        ${CMAKE_CURRENT_SOURCE_DIR}/package_consumer.py ${CMAKE_COMMAND} ${PROJECT_BINARY_DIR}
+        ${PROJECT_SOURCE_DIR} ${LRCLEXEC_LEXEC_SOURCE_DIR})
+    set_tests_properties(installed_package_consumer PROPERTIES TIMEOUT 180
+        ENVIRONMENT "ROS_DOMAIN_ID=215;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-consumer-logs;UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+endif()

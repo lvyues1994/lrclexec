@@ -4,12 +4,13 @@
 
 ## 构建
 
-依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及示例额外使用 `example_interfaces`，当前接入的本地 lexec 提交为 `23a800b`。
+依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入的本地 lexec 提交为 `23a800b`。
 
 ```bash
 cd /home/lvyues/code/rclexec/lrclexec
 source /opt/ros/jazzy/setup.bash
-cmake --preset debug -DLRCLEXEC_LEXEC_SOURCE_DIR=/home/lvyues/code/exec/lexec
+cmake --preset debug -DLRCLEXEC_LEXEC_SOURCE_DIR=/home/lvyues/code/exec/lexec \
+  -DPython3_EXECUTABLE=/usr/bin/python3
 cmake --build --preset debug -j3
 ctest --preset debug
 ```
@@ -17,12 +18,40 @@ ctest --preset debug
 ASan / UBSan 使用独立的构建目录：
 
 ```bash
-cmake --preset asan -DLRCLEXEC_LEXEC_SOURCE_DIR=/home/lvyues/code/exec/lexec
+cmake --preset asan -DLRCLEXEC_LEXEC_SOURCE_DIR=/home/lvyues/code/exec/lexec \
+  -DPython3_EXECUTABLE=/usr/bin/python3
 cmake --build --preset asan -j3
 ctest --preset asan
 ```
 
-作为子项目使用时，链接 `lrclexec::lrclexec`。父项目可以预先提供 `lexec::lexec`，或设置 `LRCLEXEC_LEXEC_SOURCE_DIR`。这是普通 CMake 库；目前没有 colcon 包、安装或导出配置。
+这里显式选择 ROS 的系统 Python，避免 ament 调用缺少 `catkin_pkg` 的个人 Python 环境。
+
+作为子项目使用时，链接 `lrclexec::lrclexec`。父项目可以预先提供 `lexec::lexec`，或设置 `LRCLEXEC_LEXEC_SOURCE_DIR`；子项目默认关闭测试、示例和安装。
+
+## 安装与 colcon
+
+项目提供 ament 包和可搬移的 CMake 导出：
+
+```bash
+cmake --install build/debug --prefix "$PWD/build/install"
+```
+
+消费方将该安装前缀加入 `CMAKE_PREFIX_PATH`，然后使用 `find_package(lrclexec CONFIG REQUIRED)` 和 `target_link_libraries(app PRIVATE lrclexec::lrclexec)`。
+
+当前 lexec 尚无安装导出规则，因此从源码构建时默认安装其核心头文件到 `include/lrclexec/vendor`，不安装 lexec runtime。若消费方预先提供 `lexec::lexec`，导出目标会使用该 provider；否则使用随包头文件。整个程序应使用同一个兼容的 lexec provider。若选择 `LRCLEXEC_BUNDLE_LEXEC_HEADERS=OFF`，安装构建需要可由 `find_package(lexec CONFIG)` 找到的 lexec 包。
+
+在当前目录也可以直接构建 ROS 包：
+
+```bash
+colcon --log-base build/colcon-log build --paths . \
+  --build-base build/colcon --install-base build/colcon-install \
+  --cmake-args -DLRCLEXEC_LEXEC_SOURCE_DIR=/home/lvyues/code/exec/lexec \
+  -DPython3_EXECUTABLE=/usr/bin/python3
+source build/colcon-install/setup.bash
+ros2 run lrclexec navigation_example
+```
+
+`package.xml` 声明示例使用的消息依赖，其中 Nav2 消息列为运行和测试依赖；默认 CMake 构建不查找它。通用库本身只链接 rclcpp、rclcpp_action、Threads 和 lexec。启用 Nav2 示例时需另行提供 nav2_msgs 与 co2 的构建依赖。项目及上游 lexec 尚未确定许可证，包元数据暂记为 `Unspecified`。
 
 ## API
 
@@ -35,8 +64,9 @@ ctest --preset asan
 | `make_action_server_preempt<Action>(scheduler, scope, name, factory)` | 将返回 sender 的工厂接为 ActionServer；保留最新等待目标，先排空旧任务再启动新任务 |
 | `server.close()` | 拒绝新目标、终止等待目标并停止当前任务；关闭任务也由 scope 跟踪 |
 | `spin_with_scope(executor, scope, stopToken)` | 收到外部停止后关闭 scope、请求停止，继续 spin 到 join，然后返回或重抛 executor 异常 |
+| `SignalStop{stopSource}` | 在普通线程接收 SIGINT/SIGTERM 并请求停止；排空期间继续接收重复信号 |
 
-头文件分别为 `TimerScheduler.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`，均位于 `lrclexec/` 下。
+头文件分别为 `TimerScheduler.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`、`SignalStop.h`，均位于 `lrclexec/` 下。
 
 Action 客户端的完成通道：
 
@@ -79,7 +109,20 @@ lrclexec::spin_with_scope(executor, scope, stop.get_token());
 // join 完成后才 shutdown ROS。
 ```
 
-应用初始化 ROS 时使用 `rclcpp::SignalHandlerOptions::None`，将退出意图接入外部 stop source，并在 join 后调用 `rclcpp::shutdown()`。停止源、scope、ActionServer 以及用户回调借用的对象都必须活到任务收束。`server.close()` 是显式异步关闭；销毁包装对象不能代替关闭和 join。
+Linux/POSIX 程序在入口先创建停止源和 `SignalStop`，再初始化 ROS、创建工作线程：
+
+```cpp
+auto stop = lexec::inplace_stop_source{};
+auto signals = lrclexec::SignalStop{stop};
+auto options = rclcpp::InitOptions{};
+options.shutdown_on_signal = false;
+rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
+// 创建节点与任务，spin_with_scope 排空后调用 rclcpp::shutdown()。
+```
+
+`SignalStop` 每个进程只能有一个，并且必须在构造线程析构。停止源须活得更久，信号资源须覆盖 join、ROS shutdown 和节点析构。它无法改变已有工作线程的信号 mask。
+
+停止源、scope、ActionServer 以及用户回调借用的对象都必须活到任务收束。`server.close()` 是显式异步关闭；销毁包装对象不能代替关闭和 join。
 
 节点必须加入持续运行的 executor。支持标准 `SingleThreadedExecutor` / `MultiThreadedExecutor`；不要在 executor 回调里对依赖同一 executor 的 sender 调用阻塞 `sync_wait`，也不要同时对一个 executor 调用 `spin` 和 `spin_with_scope`。收束期间 ROS context 必须保持有效。远端若拒绝取消或不返回终态，join 会继续等待。
 
@@ -90,8 +133,26 @@ ROS_DOMAIN_ID=212 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
   ./build/debug/examples/navigation_example
 ```
 
-`examples/navigation.cpp` 用本地 Fibonacci Action 模拟规划器和控制器：跟随当前路径时并行等待再规划；新路径产生后取消并排空旧控制任务，然后跟随新路径，最终到达目标。它验证组合及生命周期语义，尚未连接 Nav2 或真实机器人。
+`examples/navigation.cpp` 用本地 Fibonacci Action 验证基础组合。可选的 `examples/nav2` 使用标准 `ComputePathToPose` / `FollowPath` 消息及本地模拟服务器：先规划，再并行跟随路径与延时重规划；新路径完成后取消并排空旧控制任务，然后开始下一轮。
 
-集成测试覆盖定时器到期/取消竞争、接受前取消、拒绝与 abort 载荷、超时分支排空、投递失败、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join。CTest 使用本机 DDS 域 211 / 212。
+启用 Nav2 示例需要 `nav2_msgs`（本地版本 1.3.13）和 co2 源码（本地提交 `a265e577`）。当前机器的消息包位于一个独立 overlay：
+
+```bash
+NAV2_PREFIX=/home/lvyues/code/exec_extend/rclexec/deps/jazzy-root/opt/ros/jazzy
+cmake --preset debug -DLRCLEXEC_BUILD_NAV2_EXAMPLE=ON \
+  -DLRCLEXEC_CO2_SOURCE_DIR=/home/lvyues/code/coro/coro \
+  -DCMAKE_PREFIX_PATH="$NAV2_PREFIX"
+cmake --build --preset debug -j3
+ctest --preset debug
+LD_LIBRARY_PATH="$NAV2_PREFIX/lib:$LD_LIBRARY_PATH" \
+  ROS_DOMAIN_ID=216 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+  ./build/debug/examples/nav2/nav2_navigation_example
+```
+
+导航逻辑使用 co2 的 `while` 协程循环，避免递归 sender 链随重规划次数累计。它检查 Action 终态与 Nav2 `error_code`，保留阶段、协议错误种类、业务错误码和消息；遇到错误直接收束。规划器、控制器和检查器的插件 ID 由 `Resources` 配置。该逻辑仍是可选示例，未接入真实 Nav2 栈或机器人。
+
+回归覆盖定时器到期/取消竞争、接受前取消、拒绝与 abort 载荷、超时分支排空、投递失败、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join；还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
+
+CTest 使用本机 DDS 域 211–216。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
 
 目前只提供 Action 结果通道；feedback、Service、Topic、ROS LifecycleNode、仿真时间定时器和实验性 EventsExecutor 尚未适配。

@@ -4,6 +4,7 @@
 #include <lexec/any_sender_of.hpp>
 #include <lrclexec/ActionServer.h>
 #include <lrclexec/ExecuteAction.h>
+#include <lrclexec/SignalStop.h>
 #include <lrclexec/SpinWithScope.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -53,13 +54,17 @@ Navigation follow(NavigationResources const &resources, Result path, int const r
 }
 
 int main(int argc, char **argv) {
-    rclcpp::init(argc, argv, rclcpp::InitOptions{}, rclcpp::SignalHandlerOptions::None);
+    auto stop = lexec::inplace_stop_source{};
+    auto signals = lrclexec::SignalStop{stop};
+    auto options = rclcpp::InitOptions{};
+    options.shutdown_on_signal = false;
+    rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
     auto node = std::make_shared<rclcpp::Node>("lrclexec_navigation_example");
     auto scheduler = lrclexec::TimerScheduler{node};
     auto scope = lexec::counting_scope{};
-    auto stop = lexec::inplace_stop_source{};
     auto version = 0;
     auto failed = false;
+    auto reached = false;
     auto planner = lrclexec::make_action_server_preempt<Action>(scheduler, scope, "demo_planner", [&](auto) {
         auto result = std::make_shared<Action::Result>();
         result->sequence = {++version};
@@ -85,17 +90,19 @@ int main(int argc, char **argv) {
         execute(resources, resources.planner, 15) |
         lexec::let_value([resources](Result path) { return follow(resources, std::move(path), 2); }) |
         lexec::then([&](Result) noexcept {
+            reached = true;
             std::cout << "reached goal\n";
             stop.request_stop();
         }) |
         lexec::upon_error([&](auto const &) noexcept {
             failed = true;
             stop.request_stop();
-        });
+        }) |
+        lexec::upon_stopped([&]() noexcept { stop.request_stop(); });
     lexec::spawn(std::move(navigation), scope.get_token());
     auto executor = rclcpp::executors::SingleThreadedExecutor{};
     executor.add_node(node);
     lrclexec::spin_with_scope(executor, scope, stop.get_token());
     rclcpp::shutdown();
-    return failed or version != 3 ? 1 : 0;
+    return failed or signals.error() or (reached and version != 3) ? 1 : 0;
 }

@@ -1,0 +1,4 @@
+include(CMakeFindDependencyMacro)
+if(NOT @LRCLEXEC_BUNDLE_LEXEC_HEADERS@ AND NOT TARGET lexec::lexec)
+    find_dependency(lexec CONFIG)
+endif()

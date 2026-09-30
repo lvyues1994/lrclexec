@@ -1,0 +1,21 @@
+add_library(lrclexec_nav2_example STATIC Navigator.cpp)
+target_include_directories(lrclexec_nav2_example PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(lrclexec_nav2_example PUBLIC lrclexec::lrclexec co2::co2
+    nav2_msgs::nav2_msgs__rosidl_typesupport_cpp)
+target_compile_options(lrclexec_nav2_example PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+add_executable(nav2_navigation_example main.cpp)
+target_link_libraries(nav2_navigation_example PRIVATE lrclexec_nav2_example)
+if(LRCLEXEC_INSTALL)
+    install(TARGETS nav2_navigation_example RUNTIME DESTINATION lib/${PROJECT_NAME})
+endif()
+if(LRCLEXEC_BUILD_TESTS)
+    add_executable(nav2_navigation_tests tests.cpp)
+    target_link_libraries(nav2_navigation_tests PRIVATE lrclexec_nav2_example)
+    add_test(NAME nav2_navigation COMMAND nav2_navigation_tests)
+    add_test(NAME nav2_navigation_example COMMAND nav2_navigation_example)
+    get_filename_component(nav2_prefix "${nav2_msgs_DIR}/../../.." ABSOLUTE)
+    set_tests_properties(nav2_navigation PROPERTIES TIMEOUT 60
+        ENVIRONMENT "ROS_DOMAIN_ID=214;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-nav2-logs;LD_LIBRARY_PATH=${nav2_prefix}/lib:$ENV{LD_LIBRARY_PATH}")
+    set_tests_properties(nav2_navigation_example PROPERTIES TIMEOUT 30
+        ENVIRONMENT "ROS_DOMAIN_ID=216;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-nav2-example-logs;LD_LIBRARY_PATH=${nav2_prefix}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
