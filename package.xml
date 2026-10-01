@@ -2,7 +2,7 @@
 <package format="3">
   <name>lrclexec</name>
   <version>0.2.0</version>
-  <description>ROS 2 action, service, timer and task lifetime adapters for lexec.</description>
+  <description>ROS 2 action, service, topic, timer and task lifetime adapters for lexec.</description>
   <maintainer email="lvyues1994@users.noreply.github.com">lvyues1994</maintainer>
   <license>Unspecified</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
@@ -12,6 +12,7 @@
   <exec_depend>nav2_msgs</exec_depend>
   <test_depend>nav2_msgs</test_depend>
   <test_depend>rosgraph_msgs</test_depend>
+  <test_depend>std_msgs</test_depend>
   <test_depend>tf2_msgs</test_depend>
   <test_depend>sensor_msgs</test_depend>
   <test_depend>nav_msgs</test_depend>

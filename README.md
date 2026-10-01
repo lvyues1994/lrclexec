@@ -1,10 +1,10 @@
 # lrclexec
 
-用 C++17 的 [lexec](https://github.com/lvyues1994/lexec) 将 ROS 2 定时器、Action、Service 和任务生命周期接入 sender/receiver 组合。第一版依据 *Senders, Receivers, and Robots* 的思路实现，在本机 ROS 2 Jazzy（rclcpp / rclcpp_action 28.1.22）上验证。
+用 C++17 的 [lexec](https://github.com/lvyues1994/lexec) 将 ROS 2 定时器、Action、Service、Topic 和任务生命周期接入 sender/receiver 组合。第一版依据 *Senders, Receivers, and Robots* 的思路实现，在本机 ROS 2 Jazzy（rclcpp / rclcpp_action 28.1.22）上验证。
 
 ## 构建
 
-依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`，ROS 时间回归使用 `rosgraph_msgs`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入的本地 lexec 提交为 `23a800b`。
+依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`，ROS 时间回归使用 `rosgraph_msgs`，Topic 回归使用 `std_msgs`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入并由 CI 固定的 lexec 提交为 `e032d551d53d87209b83d07fd172890461db643b`。
 
 ```bash
 cd /home/lvyues/code/rclexec/lrclexec
@@ -62,17 +62,20 @@ ros2 run lrclexec navigation_example
 | `lexec::schedule(scheduler)` | 在该 executor 上异步完成 |
 | `schedule_after(scheduler, duration)` | 使用所选时钟等待，默认是 steady wall timer；非正时长也经队列异步完成 |
 | `call_service(scheduler, client, request)` | 异步等待服务可用并发送请求，返回 `Service::Response::SharedPtr` |
+| `wait_message<Message>(scheduler, topic, qos = rclcpp::QoS{1})` | 每次启动独立订阅，返回首条收到的消息副本 `shared_ptr<Message const>` |
 | `execute_action(scheduler, client, goal, options = {})` | 从发送 goal 等到远端终态，可观察 feedback 和取消应答 |
 | `make_action_server_preempt<Action>(scheduler, scope, name, factory)` | 将返回 sender 的工厂接为 ActionServer；保留最新等待目标，先排空旧任务再启动新任务 |
 | `server.close()` | 拒绝新目标、终止等待目标并停止当前任务；关闭任务也由 scope 跟踪 |
 | `spin_with_scope(executor, scope, stopToken)` | 收到外部停止后关闭 scope、请求停止，继续 spin 到 join，然后返回或重抛 executor 异常 |
 | `SignalStop{stopSource}` | 在普通线程接收 SIGINT/SIGTERM 并请求停止；排空期间继续接收重复信号 |
 
-头文件分别为 `TimerScheduler.h`、`Service.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`、`SignalStop.h`，均位于 `lrclexec/` 下。
+头文件分别为 `TimerScheduler.h`、`Service.h`、`Topic.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`、`SignalStop.h`，均位于 `lrclexec/` 下。
 
 节点时钟定时器沿用 ROS 原生跳变规则：到期前暂停 `/clock` 会暂停等待，前跳越过截止时刻可立即到期；后跳早于 timer 的 `last_call_time` 时从新时间重新计时。首条 `/clock` 前节点时间为零，首次时间跳变也可能触发到期。停止请求和 `schedule()` 的队列投递不依赖时钟推进。
 
 `call_service` 的 request 按值传入，服务发现每 20 ms 按墙钟检查，支持发现期间取消。停止或 `when_any` 超时会移除本次 pending request 并完成本地等待；ROS Service 不支持取消远端执行，迟到响应会被忽略。需要截止时长时，与墙钟 `schedule_after` 组合；SDK 或队列异常走 `set_error(std::exception_ptr)`。
+
+`wait_message` 在 `start` 后创建订阅，默认 QoS 为可靠、volatile、深度 1，可传入 `SensorDataQoS` 或 transient-local 配置。首条消息指 SDK 首次交给回调的消息：QoS 可能丢弃积压消息，也可能提供历史消息。结果复制并独立持有消息内存，兼容 DDS 借用消息；只为首条候选排队一次完成通知。完成闭包运行前 stop 仍可赢，停止或 `when_any` 超时会释放订阅；SDK/队列异常走 `set_error(std::exception_ptr)`。节点及 executor 仍须存活，ROS graph 在 executor 释放临时引用后更新。
 
 Action 客户端的完成通道：
 
@@ -165,6 +168,12 @@ LD_LIBRARY_PATH="$NAV2_PREFIX/lib:$LD_LIBRARY_PATH" \
 
 回归覆盖定时器到期/取消竞争、接受前取消、取消被拒后成功、远端暂不返回终态时 join 等待、feedback 异常及完成竞态、拒绝与 abort 载荷、超时分支排空、投递失败和恢复回调重入 ROS 客户端、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join。Service 回归检查取消、超时、迟到响应和 pending request 清理；ROS 时间回归检查暂停、前后跳变及暂停时取消。还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
 
-基础 CTest 使用本机 DDS 域 211–217；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
+Topic 回归分别使用单线程和四线程 executor，并检查普通 DDS 与进程内通信、首条消息、独立订阅、取消/超时、晚到闭包、创建/投递异常、transient-local/SensorDataQoS，以及借用消息在回调结束后的所有权。
 
-Topic、ROS LifecycleNode 和实验性 EventsExecutor 尚未适配。
+基础 CTest 使用本机 DDS 域 211–219；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
+
+## CI
+
+[GitHub Actions 配置](.github/workflows/ci.yml) 在 push、pull request 或手动触发时执行三个 Ubuntu 24.04 / Jazzy 作业：GCC Debug + Fast DDS、Clang ASan/UBSan + Fast DDS、GCC Debug + Cyclone DDS。Actions、lexec、uv 和 ROS APT 源配置包固定版本；作业执行通用库回归及移动安装目录后的消费测试，Nav2/MuJoCo 单独在本地回归。
+
+ROS LifecycleNode 和实验性 EventsExecutor 尚未适配。

@@ -3,6 +3,7 @@
 #include <lrclexec/Service.h>
 #include <lrclexec/SignalStop.h>
 #include <lrclexec/SpinWithScope.h>
+#include <lrclexec/Topic.h>
 #include <rclcpp/rclcpp.hpp>
 
 int main(int argc, char **argv) {

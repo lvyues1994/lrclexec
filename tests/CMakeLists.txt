@@ -15,6 +15,22 @@ add_test(NAME service_ros_time_adapters COMMAND lrclexec_adapter_tests)
 set_tests_properties(service_ros_time_adapters PROPERTIES TIMEOUT 30
     ENVIRONMENT "ROS_DOMAIN_ID=217;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-adapter-logs")
 
+find_package(std_msgs REQUIRED)
+add_executable(lrclexec_topic_tests topic.cpp)
+target_link_libraries(lrclexec_topic_tests PRIVATE lrclexec::lrclexec
+    std_msgs::std_msgs__rosidl_typesupport_cpp)
+target_compile_options(lrclexec_topic_tests PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+foreach(mode IN ITEMS single multi)
+    add_test(NAME topic_${mode}_executor COMMAND lrclexec_topic_tests ${mode})
+    if(mode STREQUAL "single")
+        set(topic_domain 218)
+    else()
+        set(topic_domain 219)
+    endif()
+    set_tests_properties(topic_${mode}_executor PROPERTIES TIMEOUT 45
+        ENVIRONMENT "ROS_DOMAIN_ID=${topic_domain};ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-topic-${mode}-logs")
+endforeach()
+
 add_executable(lrclexec_signal_unit signal_unit.cpp)
 target_link_libraries(lrclexec_signal_unit PRIVATE lrclexec::lrclexec)
 add_test(NAME signal_mask_lifetime COMMAND lrclexec_signal_unit)
