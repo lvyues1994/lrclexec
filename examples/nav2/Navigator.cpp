@@ -59,7 +59,10 @@ auto follow(Resources const &resources, Plan::Result::SharedPtr const &path) {
     goal.controller_id = resources.controllerId;
     goal.goal_checker_id = resources.goalCheckerId;
     goal.progress_checker_id = resources.progressCheckerId;
-    return lrclexec::execute_action(resources.scheduler, resources.controller, std::move(goal)) |
+    auto options = lrclexec::ActionOptions<Follow>{};
+    options.feedback = resources.progress;
+    return lrclexec::execute_action(resources.scheduler, resources.controller, std::move(goal),
+                                    std::move(options)) |
            lexec::upon_error(MapActionFailure<Follow>{Phase::following}) |
            lexec::then(CheckResult{Phase::following}) |
            lexec::then([](Follow::Result::SharedPtr) noexcept -> Step { return ReachedGoal{}; });

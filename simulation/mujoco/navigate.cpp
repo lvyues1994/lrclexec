@@ -1,9 +1,11 @@
 #include "Navigator.h"
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <lexec/coro/co2.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lifecycle_msgs/srv/get_state.hpp>
+#include <lrclexec/Service.h>
 #include <lrclexec/SignalStop.h>
 #include <lrclexec/SpinWithScope.h>
 #include <rclcpp/rclcpp.hpp>
@@ -12,16 +14,67 @@
 using namespace std::chrono_literals;
 namespace {
 struct StartupStopped {};
-bool waitActive(rclcpp::Node::SharedPtr const &node, rclcpp::Executor &executor,
+struct ActiveState {
+    std::atomic<bool> ready{false};
+    bool active = false;
+    bool stopped = false;
+    std::exception_ptr error;
+};
+struct ActiveReceiver {
+    using receiver_concept = lexec::receiver_t;
+    void set_value(bool active) && noexcept {
+        state->active = active;
+        state->ready = true;
+    }
+    void set_stopped() && noexcept {
+        state->stopped = true;
+        state->ready = true;
+    }
+    void set_error(std::exception_ptr error) && noexcept {
+        state->error = error;
+        state->ready = true;
+    }
+    ActiveState *state;
+};
+bool waitActive(lrclexec::TimerScheduler const &scheduler, rclcpp::Executor &executor,
                 lexec::inplace_stop_token stop, char const *name) {
-    auto client = node->create_client<lifecycle_msgs::srv::GetState>(std::string{name} + "/get_state");
+    using Service = lifecycle_msgs::srv::GetState;
+    auto client = scheduler.node().create_client<Service>(std::string{name} + "/get_state");
     auto const deadline = std::chrono::steady_clock::now() + 25s;
     while (not stop.stop_requested() and std::chrono::steady_clock::now() < deadline) {
-        if (not client->wait_for_service(200ms))
-            continue;
-        auto future = client->async_send_request(std::make_shared<lifecycle_msgs::srv::GetState::Request>());
-        if (executor.spin_until_future_complete(future, 500ms) == rclcpp::FutureReturnCode::SUCCESS and
-            future.get()->current_state.id == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+        auto query =
+            lrclexec::call_service(scheduler, client, Service::Request{}) |
+            lexec::then([](Service::Response::SharedPtr response) noexcept {
+                return response->current_state.id == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+            });
+        auto timeout =
+            lrclexec::schedule_after(scheduler, 500ms) | lexec::then([]() noexcept { return false; });
+        auto state = ActiveState{};
+        auto localStop = lexec::inplace_stop_source{};
+        auto forwardStop =
+            lexec::inplace_stop_callback{stop, [&localStop]() noexcept { localStop.request_stop(); }};
+        auto operation =
+            lexec::connect(lexec::write_env(lexec::when_any(std::move(query), std::move(timeout)),
+                                            lexec::prop{lexec::get_stop_token, localStop.get_token()}),
+                           ActiveReceiver{&state});
+        lexec::start(operation);
+        std::exception_ptr spinError;
+        while (not state.ready.load()) {
+            try {
+                executor.spin_once(50ms);
+            } catch (...) {
+                if (not spinError)
+                    spinError = std::current_exception();
+                localStop.request_stop();
+            }
+        }
+        if (spinError)
+            std::rethrow_exception(spinError);
+        if (state.error)
+            std::rethrow_exception(state.error);
+        if (state.stopped)
+            throw StartupStopped{};
+        if (state.active)
             return true;
         executor.spin_once(100ms);
     }
@@ -45,10 +98,11 @@ int main(int argc, char **argv) {
         auto executor = rclcpp::executors::SingleThreadedExecutor{};
         executor.add_node(node);
         std::cout << "WAITING_FOR_NAV2\n" << std::flush;
-        if (not waitActive(node, executor, stop.get_token(), "planner_server") or
-            not waitActive(node, executor, stop.get_token(), "controller_server"))
+        auto startupScheduler = lrclexec::TimerScheduler{node};
+        if (not waitActive(startupScheduler, executor, stop.get_token(), "planner_server") or
+            not waitActive(startupScheduler, executor, stop.get_token(), "controller_server"))
             throw std::runtime_error{"Nav2 lifecycle did not become ACTIVE"};
-        auto scheduler = lrclexec::TimerScheduler{node};
+        auto scheduler = lrclexec::TimerScheduler{node, lrclexec::TimerClock::node};
         auto resources = navigation::Resources{
             scheduler, rclcpp_action::create_client<navigation::Plan>(node, "compute_path_to_pose"),
             rclcpp_action::create_client<navigation::Follow>(node, "follow_path")};
@@ -61,7 +115,9 @@ int main(int argc, char **argv) {
         resources.progressCheckerId = "progress_checker";
         resources.replanInterval = 1s;
         auto planCount = 0;
+        auto progressCount = 0;
         resources.pathReady = [&](auto const &) { ++planCount; };
+        resources.progress = [&](auto const &) { ++progressCount; };
         auto target = geometry_msgs::msg::PoseStamped{};
         target.header.frame_id = "map";
         target.header.stamp = node->now();
@@ -90,7 +146,7 @@ int main(int argc, char **argv) {
         std::cout << "GOAL_STARTED\n" << std::flush;
         lexec::spawn(std::move(work), scope.get_token());
         lrclexec::spin_with_scope(executor, scope, stop.get_token());
-        std::cout << "DRAINED plans=" << planCount << '\n' << std::flush;
+        std::cout << "DRAINED plans=" << planCount << " feedback=" << progressCount << '\n' << std::flush;
         if (signals.error())
             status = 1;
     } catch (StartupStopped const &) {

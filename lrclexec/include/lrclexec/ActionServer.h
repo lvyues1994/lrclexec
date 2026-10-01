@@ -278,7 +278,8 @@ struct ActionServerState final : std::enable_shared_from_this<ActionServerState<
 
 namespace lrclexec {
 
-// Keep the server and its borrowed scope alive until the scope has joined.
+// Keep the server, scope and factory's borrowed objects alive through scope
+// join and executor shutdown (including joining any spin threads).
 template <class Action, class Factory> struct ActionServer {
     explicit ActionServer(std::shared_ptr<detail::ActionServerState<Action, Factory>> state_)
         : state{std::move(state_)} {}

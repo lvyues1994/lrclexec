@@ -5,6 +5,16 @@ add_test(NAME lrclexec_integration COMMAND lrclexec_tests)
 set_tests_properties(lrclexec_integration PROPERTIES TIMEOUT 60
     ENVIRONMENT "ROS_DOMAIN_ID=211;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-test-logs")
 
+find_package(rosgraph_msgs REQUIRED)
+add_executable(lrclexec_adapter_tests adapters.cpp)
+target_link_libraries(lrclexec_adapter_tests PRIVATE lrclexec::lrclexec
+    example_interfaces::example_interfaces__rosidl_typesupport_cpp
+    rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp)
+target_compile_options(lrclexec_adapter_tests PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+add_test(NAME service_ros_time_adapters COMMAND lrclexec_adapter_tests)
+set_tests_properties(service_ros_time_adapters PROPERTIES TIMEOUT 30
+    ENVIRONMENT "ROS_DOMAIN_ID=217;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-adapter-logs")
+
 add_executable(lrclexec_signal_unit signal_unit.cpp)
 target_link_libraries(lrclexec_signal_unit PRIVATE lrclexec::lrclexec)
 add_test(NAME signal_mask_lifetime COMMAND lrclexec_signal_unit)

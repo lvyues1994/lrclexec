@@ -11,6 +11,7 @@
 
 namespace lrclexec {
 struct TimerScheduler;
+enum struct TimerClock { steady, node };
 
 namespace detail {
 
@@ -34,9 +35,9 @@ template <class Receiver> struct TimerState final : std::enable_shared_from_this
     using StopCallback = lexec::stop_callback_for_t<Token, Stop>;
 
     TimerState(std::shared_ptr<ExecutionContext> context_, std::chrono::nanoseconds const delay_,
-               Receiver receiver)
-        : context{std::move(context_)}, delay{delay_}, token{lexec::get_stop_token(lexec::get_env(receiver))},
-          completion{std::move(receiver)} {}
+               rclcpp::Clock::SharedPtr clock_, Receiver receiver)
+        : context{std::move(context_)}, delay{delay_}, clock{std::move(clock_)},
+          token{lexec::get_stop_token(lexec::get_env(receiver))}, completion{std::move(receiver)} {}
 
     void start() noexcept {
         auto state = this->shared_from_this();
@@ -76,14 +77,18 @@ template <class Receiver> struct TimerState final : std::enable_shared_from_this
     void arm() {
         auto const weak = this->weak_from_this();
         auto &node = context->node();
-        timer = rclcpp::create_wall_timer(
-            delay,
-            [weak] {
-                if (auto state = weak.lock())
-                    state->expired();
-            },
-            context->callbackGroup(), node.get_node_base_interface().get(),
-            node.get_node_timers_interface().get(), false);
+        auto callback = [weak] {
+            if (auto state = weak.lock())
+                state->expired();
+        };
+        if (clock)
+            timer = rclcpp::create_timer(clock, delay, callback, context->callbackGroup(),
+                                         node.get_node_base_interface().get(),
+                                         node.get_node_timers_interface().get(), false);
+        else
+            timer = rclcpp::create_wall_timer(delay, callback, context->callbackGroup(),
+                                              node.get_node_base_interface().get(),
+                                              node.get_node_timers_interface().get(), false);
         timer->reset();
     }
     void expired() noexcept {
@@ -137,6 +142,7 @@ template <class Receiver> struct TimerState final : std::enable_shared_from_this
 
     std::shared_ptr<ExecutionContext> context;
     std::chrono::nanoseconds delay;
+    rclcpp::Clock::SharedPtr clock;
     Token token;
     Completion<Receiver> completion;
     std::optional<StopCallback> stopCallback;
@@ -161,6 +167,7 @@ template <class State> struct SharedOperation {
 struct TimerAttributes {
     TimerScheduler query(lexec::get_completion_scheduler_t<lexec::set_value_t>) const noexcept;
     std::shared_ptr<ExecutionContext> context;
+    rclcpp::Clock::SharedPtr clock;
 };
 
 } // namespace detail
@@ -173,40 +180,45 @@ struct TimerSender {
 
     template <class Receiver> auto connect(Receiver receiver) const {
         using State = detail::TimerState<Receiver>;
-        return detail::SharedOperation<State>{std::make_shared<State>(context, delay, std::move(receiver))};
+        return detail::SharedOperation<State>{
+            std::make_shared<State>(context, delay, clock, std::move(receiver))};
     }
-    detail::TimerAttributes get_env() const noexcept { return {context}; }
+    detail::TimerAttributes get_env() const noexcept { return {context, clock}; }
 
     std::shared_ptr<detail::ExecutionContext> context;
     std::chrono::nanoseconds delay;
+    rclcpp::Clock::SharedPtr clock;
 };
 
 // Copies share one executor queue and one mutually exclusive callback group.
 struct TimerScheduler {
     using scheduler_concept = lexec::scheduler_t;
-    explicit TimerScheduler(std::shared_ptr<rclcpp::Node> node)
-        : context{detail::makeExecutionContext(std::move(node))} {}
-    explicit TimerScheduler(std::shared_ptr<detail::ExecutionContext> context_)
-        : context{std::move(context_)} {}
-    TimerSender schedule() const noexcept { return {context, std::chrono::nanoseconds{0}}; }
+    explicit TimerScheduler(std::shared_ptr<rclcpp::Node> node, TimerClock timerClock = TimerClock::steady)
+        : context{detail::makeExecutionContext(std::move(node))},
+          clock{timerClock == TimerClock::node ? context->node().get_clock() : nullptr} {}
+    explicit TimerScheduler(std::shared_ptr<detail::ExecutionContext> context_,
+                            rclcpp::Clock::SharedPtr clock_ = {})
+        : context{std::move(context_)}, clock{std::move(clock_)} {}
+    TimerSender schedule() const noexcept { return {context, std::chrono::nanoseconds{0}, clock}; }
     TimerSender schedule_after(std::chrono::nanoseconds const delay) const noexcept {
-        return {context, delay};
+        return {context, delay, clock};
     }
     rclcpp::Node &node() const noexcept { return context->node(); }
     rclcpp::CallbackGroup::SharedPtr callbackGroup() const noexcept { return context->callbackGroup(); }
     std::shared_ptr<detail::ExecutionContext> executionContext() const noexcept { return context; }
     friend bool operator==(TimerScheduler const &a, TimerScheduler const &b) noexcept {
-        return a.context == b.context;
+        return a.context == b.context and a.clock == b.clock;
     }
     friend bool operator!=(TimerScheduler const &a, TimerScheduler const &b) noexcept { return not(a == b); }
 
   private:
     std::shared_ptr<detail::ExecutionContext> context;
+    rclcpp::Clock::SharedPtr clock;
 };
 
 inline TimerScheduler
 detail::TimerAttributes::query(lexec::get_completion_scheduler_t<lexec::set_value_t>) const noexcept {
-    return TimerScheduler{context};
+    return TimerScheduler{context, clock};
 }
 
 inline auto schedule_after(TimerScheduler const &scheduler, std::chrono::nanoseconds const delay) noexcept {

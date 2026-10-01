@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <example_interfaces/action/fibonacci.hpp>
 #include <future>
 #include <iostream>
@@ -38,13 +39,21 @@ struct Fixture {
             },
             [this](auto) {
                 cancellations.fetch_add(1);
-                return rclcpp_action::CancelResponse::ACCEPT;
+                return acceptCancellation.load() ? rclcpp_action::CancelResponse::ACCEPT
+                                                 : rclcpp_action::CancelResponse::REJECT;
             },
             [this](auto handle) {
                 accepted.fetch_add(1);
                 auto const started = std::chrono::steady_clock::now();
                 auto timerSlot = std::make_shared<rclcpp::TimerBase::SharedPtr>();
                 auto timer = serverNode->create_wall_timer(2ms, [this, handle, started, timerSlot] {
+                    if (publishFeedback.exchange(false) and handle->is_executing()) {
+                        auto feedback = std::make_shared<Action::Feedback>();
+                        feedback->sequence = {7};
+                        handle->publish_feedback(feedback);
+                    }
+                    if (not allowTerminal.load())
+                        return;
                     auto const elapsed = std::chrono::steady_clock::now() - started;
                     auto result = std::make_shared<Action::Result>();
                     result->sequence = {42};
@@ -69,21 +78,27 @@ struct Fixture {
                 timers.push_back({std::move(timer), timerSlot});
             });
         client = rclcpp_action::create_client<Action>(node, "lrclexec_test_action");
-        spinner = std::thread{[this] { executor.spin(); }};
+        startExecutor();
         check(client->wait_for_action_server(3s), "action server discovery failed");
     }
     ~Fixture() {
         allowAcceptance.store(true);
-        executor.cancel();
-        if (spinner.joinable())
-            spinner.join();
+        stopExecutor();
         for (auto &timer : timers)
             timer.slot->reset();
     }
-    auto action(int const milliseconds) {
+    auto action(int const milliseconds, lrclexec::ActionOptions<Action> options = {}) {
         auto goal = Action::Goal{};
         goal.order = milliseconds;
-        return lrclexec::execute_action(scheduler, client, std::move(goal));
+        return lrclexec::execute_action(scheduler, client, std::move(goal), std::move(options));
+    }
+    void startExecutor() {
+        spinner = std::thread{[this] { executor.spin(); }};
+    }
+    void stopExecutor() {
+        executor.cancel();
+        if (spinner.joinable())
+            spinner.join();
     }
 
     struct TimerEntry {
@@ -101,7 +116,13 @@ struct Fixture {
     std::vector<TimerEntry> timers;
     std::atomic<int> requests{0}, accepted{0}, cancellations{0}, terminals{0};
     std::atomic<bool> delayAcceptance{false}, allowAcceptance{false};
+    std::atomic<bool> acceptCancellation{true}, allowTerminal{true}, publishFeedback{false};
     std::chrono::milliseconds cancelDelay{60};
+};
+
+struct StopExecutor {
+    ~StopExecutor() { fixture.stopExecutor(); }
+    Fixture &fixture;
 };
 
 template <class Predicate> void waitUntil(Predicate predicate) {
@@ -111,6 +132,11 @@ template <class Predicate> void waitUntil(Predicate predicate) {
         std::this_thread::sleep_for(1ms);
     }
 }
+
+struct ReleaseGate {
+    std::atomic<bool> &gate;
+    ~ReleaseGate() { gate.store(true); }
+};
 
 void timerTests(Fixture &fixture) {
     static_assert(lexec::is_scheduler_v<lrclexec::TimerScheduler>);
@@ -197,6 +223,143 @@ void actionTests(Fixture &fixture) {
           "race returned before action drain");
 }
 
+void actionBoundaryTests(Fixture &fixture) {
+    fixture.acceptCancellation.store(false);
+    fixture.allowTerminal.store(false);
+    auto source = lexec::inplace_stop_source{};
+    auto accepted = fixture.accepted.load();
+    auto cancelCode = std::atomic<int>{-1};
+    auto options = lrclexec::ActionOptions<Action>{};
+    options.cancelResponse = [&](auto response) { cancelCode.store(response->return_code); };
+    auto future = std::async(std::launch::async, [&] {
+        return lexec::sync_wait(lexec::write_env(fixture.action(1, options),
+                                                 lexec::prop{lexec::get_stop_token, source.get_token()}));
+    });
+    auto rescue = ReleaseGate{fixture.allowTerminal};
+    waitUntil([&] { return fixture.accepted.load() > accepted; });
+    source.request_stop();
+    waitUntil([&] { return cancelCode.load() >= 0; });
+    auto const waited = future.wait_for(20ms) == std::future_status::timeout;
+    fixture.allowTerminal.store(true);
+    check(future.wait_for(3s) == std::future_status::ready, "rejected cancellation did not finish");
+    auto result = future.get();
+    check(waited, "cancel response completed action before terminal");
+    check(cancelCode.load() == rclcpp_action::Client<Action>::CancelResponse::ERROR_REJECTED,
+          "cancel rejection was not observable");
+    check(result and std::get<0>(*result)->sequence.front() == 42,
+          "successful terminal was lost after rejected cancellation");
+    fixture.acceptCancellation.store(true);
+
+    // A peer that accepts cancellation but withholds its result keeps scope alive.
+    fixture.allowTerminal.store(false);
+    accepted = fixture.accepted.load();
+    auto const cancels = fixture.cancellations.load();
+    auto scope = lexec::counting_scope{};
+    auto completed = std::atomic<int>{0};
+    auto work = fixture.action(1000) | lexec::then([](auto) noexcept {}) |
+                lexec::upon_error([](auto const &) noexcept {}) |
+                lexec::upon_stopped([&]() noexcept { ++completed; });
+    lexec::spawn(std::move(work), scope.get_token());
+    auto joined = std::atomic<bool>{false};
+    auto join = lexec::connect(scope.join(), lrclexec::detail::JoinReceiver{&joined});
+    auto joinStarted = false;
+    auto held = false;
+    std::exception_ptr failure;
+    try {
+        waitUntil([&] { return fixture.accepted.load() > accepted; });
+        scope.close();
+        scope.request_stop();
+        lexec::start(join);
+        joinStarted = true;
+        waitUntil([&] { return fixture.cancellations.load() > cancels; });
+        (void)lexec::sync_wait(lrclexec::schedule_after(fixture.scheduler, 20ms));
+        held = not joined.load() and completed.load() == 0;
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    fixture.allowTerminal.store(true);
+    scope.close();
+    scope.request_stop();
+    if (not joinStarted)
+        lexec::start(join);
+    try {
+        waitUntil([&] { return joined.load(); });
+    } catch (...) {
+        std::cerr << "withheld terminal could not be rescued\n";
+        std::_Exit(1);
+    }
+    (void)lexec::sync_wait(lexec::schedule(fixture.scheduler));
+    if (failure)
+        std::rethrow_exception(failure);
+    check(joined.load(), "scope join notification was lost");
+    check(held, "scope completed while peer withheld terminal");
+    check(completed.load() == 1, "cancel did not complete exactly once");
+}
+
+struct FaultContext final : lrclexec::detail::ExecutionContext {
+    explicit FaultContext(std::shared_ptr<lrclexec::detail::ExecutionContext> inner_)
+        : inner{std::move(inner_)} {}
+    void post(std::function<void()> task) override {
+        if (posts.fetch_add(1) + 1 == failAt or failNext.exchange(false)) {
+            ++failures;
+            throw std::runtime_error{"injected post failure"};
+        }
+        inner->post(std::move(task));
+        ++delivered;
+    }
+    rclcpp::Node &node() const noexcept override { return inner->node(); }
+    rclcpp::CallbackGroup::SharedPtr callbackGroup() const noexcept override {
+        return inner->callbackGroup();
+    }
+    std::shared_ptr<lrclexec::detail::ExecutionContext> inner;
+    std::atomic<int> posts{0};
+    std::atomic<int> delivered{0};
+    std::atomic<int> failures{0};
+    std::atomic<bool> failNext{false};
+    int failAt = 2;
+};
+
+void feedbackTests(Fixture &fixture) {
+    for (bool const throws : {false, true}) {
+        auto context = std::make_shared<FaultContext>(fixture.scheduler.executionContext());
+        context->failAt = -1;
+        auto scheduler = lrclexec::TimerScheduler{context};
+        fixture.allowTerminal.store(false);
+        auto calls = std::atomic<int>{0};
+        auto errorObserved = false;
+        auto const terminals = fixture.terminals.load();
+        auto options = lrclexec::ActionOptions<Action>{};
+        options.feedback = [&, throws](auto feedback) {
+            check(feedback->sequence.front() == 7, "feedback payload lost");
+            ++calls;
+            if (throws)
+                throw std::runtime_error{"injected observer failure"};
+        };
+        auto goal = Action::Goal{};
+        goal.order = throws ? 1000 : 40;
+        auto future = std::async(std::launch::async, [&] {
+            return lexec::sync_wait(lrclexec::execute_action(scheduler, fixture.client, goal, options) |
+                                    lexec::let_error([&](auto const &) {
+                                        errorObserved = true;
+                                        return lexec::just(std::make_shared<Action::Result>());
+                                    }));
+        });
+        auto rescue = ReleaseGate{fixture.allowTerminal};
+        waitUntil([&] { return context->delivered.load() >= 2; });
+        (void)lexec::sync_wait(lexec::schedule(fixture.scheduler));
+        fixture.publishFeedback.store(true);
+        waitUntil([&] { return calls.load() > 0; });
+        fixture.allowTerminal.store(true);
+        check(future.wait_for(3s) == std::future_status::ready, "feedback action did not drain");
+        (void)future.get();
+        auto const atTerminal = calls.load();
+        (void)lexec::sync_wait(lrclexec::schedule_after(fixture.scheduler, 20ms));
+        check(errorObserved == throws and fixture.terminals.load() > terminals,
+              "observer failure or terminal result was lost");
+        check(calls.load() == atTerminal, "feedback ran after action completion");
+    }
+}
+
 void scopeTest() {
     auto node = std::make_shared<rclcpp::Node>("lrclexec_scope_test");
     auto scheduler = lrclexec::TimerScheduler{node};
@@ -217,22 +380,49 @@ void scopeTest() {
     check(not scope.get_token().try_associate(), "closed scope accepted more work");
 }
 
-struct FaultContext final : lrclexec::detail::ExecutionContext {
-    explicit FaultContext(std::shared_ptr<lrclexec::detail::ExecutionContext> inner_)
-        : inner{std::move(inner_)} {}
-    void post(std::function<void()> task) override {
-        if (posts.fetch_add(1) + 1 == failAt)
-            throw std::runtime_error{"injected post failure"};
-        inner->post(std::move(task));
-    }
-    rclcpp::Node &node() const noexcept override { return inner->node(); }
-    rclcpp::CallbackGroup::SharedPtr callbackGroup() const noexcept override {
-        return inner->callbackGroup();
-    }
-    std::shared_ptr<lrclexec::detail::ExecutionContext> inner;
-    std::atomic<int> posts{0};
-    int failAt = 2;
-};
+void feedbackTerminalRaceTest(Fixture &fixture) {
+    auto context = std::make_shared<FaultContext>(fixture.scheduler.executionContext());
+    context->failAt = -1;
+    auto scheduler = lrclexec::TimerScheduler{context};
+    fixture.publishFeedback.store(false);
+    fixture.allowTerminal.store(false);
+    auto release = std::atomic<bool>{false};
+    auto entered = std::atomic<bool>{false};
+    auto observedError = false;
+    auto options = lrclexec::ActionOptions<Action>{};
+    options.feedback = [&](auto) {
+        fixture.publishFeedback.store(false);
+        // The fixture publishes exactly one feedback message per armed test.
+        if (entered.exchange(true))
+            return;
+        while (not release.load())
+            std::this_thread::sleep_for(1ms);
+    };
+    auto goal = Action::Goal{};
+    goal.order = 1;
+    auto future = std::async(std::launch::async, [&] {
+        return lexec::sync_wait(lrclexec::execute_action(scheduler, fixture.client, goal, options) |
+                                lexec::let_error([&](auto const &) {
+                                    observedError = true;
+                                    return lexec::just(std::make_shared<Action::Result>());
+                                }));
+    });
+    auto rescue = ReleaseGate{release};
+    auto terminalRescue = ReleaseGate{fixture.allowTerminal};
+    waitUntil([&] { return context->delivered.load() >= 2; });
+    (void)lexec::sync_wait(lexec::schedule(fixture.scheduler));
+    fixture.publishFeedback.store(true);
+    waitUntil([&] { return entered.load(); });
+    // The only feedback callback is now blocked; the next SDK post is the result.
+    context->failNext.store(true);
+    fixture.allowTerminal.store(true);
+    waitUntil([&] { return context->failures.load() > 0; });
+    auto const waited = future.wait_for(20ms) == std::future_status::timeout;
+    release.store(true);
+    check(future.wait_for(3s) == std::future_status::ready, "feedback terminal race did not drain");
+    (void)future.get();
+    check(waited and observedError, "terminal completed before observer returned");
+}
 
 void postFailureTests(Fixture &fixture) {
     {
@@ -272,6 +462,27 @@ void postFailureTests(Fixture &fixture) {
         check(observed, "post failure was not reported");
         check(fixture.terminals.load() > terminals, "post failure completed before remote drain");
     }
+    // Completing a rejected goal from the SDK callback stack would deadlock
+    // this recovery's direct async_send_goal on the SDK goal-request mutex.
+    auto context = std::make_shared<FaultContext>(fixture.scheduler.executionContext());
+    auto scheduler = lrclexec::TimerScheduler{context};
+    auto rejected = Action::Goal{};
+    rejected.order = -1;
+    std::shared_future<rclcpp_action::ClientGoalHandle<Action>::SharedPtr> native;
+    auto recovery =
+        lrclexec::execute_action(scheduler, fixture.client, rejected) | lexec::let_error([&](auto const &) {
+            auto goal = Action::Goal{};
+            goal.order = 5;
+            native = fixture.client->async_send_goal(goal);
+            return lexec::just(std::make_shared<Action::Result>());
+        });
+    (void)lexec::sync_wait(std::move(recovery));
+    check(native.valid() and native.wait_for(3s) == std::future_status::ready,
+          "queue-failure recovery could not reenter ROS client");
+    auto result = fixture.client->async_get_result(native.get());
+    check(result.wait_for(3s) == std::future_status::ready and
+              result.get().code == rclcpp_action::ResultCode::SUCCEEDED,
+          "reentrant recovery goal did not finish");
 }
 
 void drainExceptionTest() {
@@ -350,6 +561,8 @@ void serverTests(Fixture &fixture) {
                    });
         });
     auto client = rclcpp_action::create_client<Action>(fixture.node, "lrclexec_adapted_server");
+    // Join before either native Action waitable can lose its last owner.
+    auto stopExecutor = StopExecutor{fixture};
     check(client->wait_for_action_server(3s), "adapted server discovery failed");
     auto action = [&](int const delay) {
         auto goal = Action::Goal{};
@@ -419,6 +632,7 @@ void pendingServerTests(Fixture &fixture) {
                    });
         });
     auto client = rclcpp_action::create_client<Action>(fixture.node, "lrclexec_pending_server");
+    auto stopExecutor = StopExecutor{fixture};
     check(client->wait_for_action_server(3s), "pending server discovery failed");
     auto send = [&](int const delay) {
         auto goal = Action::Goal{};
@@ -506,10 +720,14 @@ int main(int argc, char **argv) {
             timerTests(fixture);
             std::cerr << "action checks\n";
             actionTests(fixture);
+            actionBoundaryTests(fixture);
+            feedbackTests(fixture);
+            feedbackTerminalRaceTest(fixture);
             std::cerr << "post failure checks\n";
             postFailureTests(fixture);
             std::cerr << "server checks\n";
             serverTests(fixture);
+            fixture.startExecutor();
             pendingServerTests(fixture);
         }
         std::cerr << "scope checks\n";

@@ -1,10 +1,10 @@
 # lrclexec
 
-用 C++17 的 [lexec](https://github.com/lvyues1994/lexec) 将 ROS 2 定时器、Action 和任务生命周期接入 sender/receiver 组合。第一版依据 *Senders, Receivers, and Robots* 的思路实现，在本机 ROS 2 Jazzy（rclcpp / rclcpp_action 28.1.22）上验证。
+用 C++17 的 [lexec](https://github.com/lvyues1994/lexec) 将 ROS 2 定时器、Action、Service 和任务生命周期接入 sender/receiver 组合。第一版依据 *Senders, Receivers, and Robots* 的思路实现，在本机 ROS 2 Jazzy（rclcpp / rclcpp_action 28.1.22）上验证。
 
 ## 构建
 
-依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入的本地 lexec 提交为 `23a800b`。
+依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`，ROS 时间回归使用 `rosgraph_msgs`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入的本地 lexec 提交为 `23a800b`。
 
 ```bash
 cd /home/lvyues/code/rclexec/lrclexec
@@ -58,15 +58,21 @@ ros2 run lrclexec navigation_example
 | 入口 | 行为 |
 | --- | --- |
 | `TimerScheduler{node}` | 创建 executor 队列及专用互斥 callback group；副本共享这两项资源 |
+| `TimerScheduler{node, TimerClock::node}` | 定时器使用节点时钟；`use_sim_time=true` 时跟随 `/clock` |
 | `lexec::schedule(scheduler)` | 在该 executor 上异步完成 |
-| `schedule_after(scheduler, duration)` | 使用 ROS wall timer 等待；非正时长也经队列异步完成 |
-| `execute_action(scheduler, client, goal)` | 表示从发送 goal 到服务端返回终态的整个操作 |
+| `schedule_after(scheduler, duration)` | 使用所选时钟等待，默认是 steady wall timer；非正时长也经队列异步完成 |
+| `call_service(scheduler, client, request)` | 异步等待服务可用并发送请求，返回 `Service::Response::SharedPtr` |
+| `execute_action(scheduler, client, goal, options = {})` | 从发送 goal 等到远端终态，可观察 feedback 和取消应答 |
 | `make_action_server_preempt<Action>(scheduler, scope, name, factory)` | 将返回 sender 的工厂接为 ActionServer；保留最新等待目标，先排空旧任务再启动新任务 |
 | `server.close()` | 拒绝新目标、终止等待目标并停止当前任务；关闭任务也由 scope 跟踪 |
 | `spin_with_scope(executor, scope, stopToken)` | 收到外部停止后关闭 scope、请求停止，继续 spin 到 join，然后返回或重抛 executor 异常 |
 | `SignalStop{stopSource}` | 在普通线程接收 SIGINT/SIGTERM 并请求停止；排空期间继续接收重复信号 |
 
-头文件分别为 `TimerScheduler.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`、`SignalStop.h`，均位于 `lrclexec/` 下。
+头文件分别为 `TimerScheduler.h`、`Service.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`、`SignalStop.h`，均位于 `lrclexec/` 下。
+
+节点时钟定时器沿用 ROS 原生跳变规则：到期前暂停 `/clock` 会暂停等待，前跳越过截止时刻可立即到期；后跳早于 timer 的 `last_call_time` 时从新时间重新计时。首条 `/clock` 前节点时间为零，首次时间跳变也可能触发到期。停止请求和 `schedule()` 的队列投递不依赖时钟推进。
+
+`call_service` 的 request 按值传入，服务发现每 20 ms 按墙钟检查，支持发现期间取消。停止或 `when_any` 超时会移除本次 pending request 并完成本地等待；ROS Service 不支持取消远端执行，迟到响应会被忽略。需要截止时长时，与墙钟 `schedule_after` 组合；SDK 或队列异常走 `set_error(std::exception_ptr)`。
 
 Action 客户端的完成通道：
 
@@ -80,6 +86,8 @@ Action 客户端的完成通道：
 | SDK / 队列异常 | `set_error(std::exception_ptr)` |
 
 停止请求发生在发送前时，不发送 goal；发生在接受前时，等到拿到 handle 后发送取消。取消应答只说明请求被处理，sender 仍等待终态。取消与成功竞争时，以服务端最终结果为准；`when_any` 因此会等待落败 Action 清理结束。
+
+`ActionOptions<Action>::feedback` 接收 `shared_ptr<Action::Feedback const>`，`cancelResponse` 接收 SDK 的取消应答，可检查 `return_code`。两者经 executor 队列投递，只在 Action 尚未结束时通知；终态先到时可能跳过迟到的取消应答。回调抛异常会请求取消，等待远端终态后报告异常；sender 完成前会等待正在执行的观察回调退出。Action 应答投递失败时保留应答并最多重投一次，避免在 SDK 锁内调用用户代码；队列持续失败时无法保证继续执行或有界 join。
 
 服务端工厂返回 `set_value(Result::SharedPtr)` 表示成功；error 或 stopped 表示终止。客户端取消映射为 `CANCELED`，服务端抢占映射为 `ABORTED`。旧 sender 的 operation 析构后才调用下一目标的工厂；关闭 scope 会终止尚未启动的目标。工厂内部应使用 sender 表达异步清理，及时响应 stop token。
 
@@ -124,6 +132,8 @@ rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
 
 停止源、scope、ActionServer 以及用户回调借用的对象都必须活到任务收束。`server.close()` 是显式异步关闭；销毁包装对象不能代替关闭和 join。
 
+本机 Jazzy 的原生 Action client/server 析构会移除 callback group 中的 waitable；与 executor 收集实体并发时可能自锁。应用须持有客户端、服务端及其借用对象，到 executor 停止且 spin 线程 join 之后再释放。
+
 节点必须加入持续运行的 executor。支持标准 `SingleThreadedExecutor` / `MultiThreadedExecutor`；不要在 executor 回调里对依赖同一 executor 的 sender 调用阻塞 `sync_wait`，也不要同时对一个 executor 调用 `spin` 和 `spin_with_scope`。收束期间 ROS context 必须保持有效。远端若拒绝取消或不返回终态，join 会继续等待。
 
 ## 导航模拟与测试
@@ -153,8 +163,8 @@ LD_LIBRARY_PATH="$NAV2_PREFIX/lib:$LD_LIBRARY_PATH" \
 
 [MuJoCo 差速底盘示例](simulation/mujoco/README.md) 将同一导航逻辑接入真实 Nav2 planner/controller，使用轮子接触动力学、激光和真值里程计完成导航，支持无界面运行和可选原生窗口。可选开关 `LRCLEXEC_BUILD_MUJOCO_SIM=ON` 默认关闭。回归检查直达、激光发现障碍后绕行、运动中取消及启动阶段取消，并核对物理停稳和进程正常退出；构建和运行步骤见示例说明。
 
-回归覆盖定时器到期/取消竞争、接受前取消、拒绝与 abort 载荷、超时分支排空、投递失败、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join；还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
+回归覆盖定时器到期/取消竞争、接受前取消、取消被拒后成功、远端暂不返回终态时 join 等待、feedback 异常及完成竞态、拒绝与 abort 载荷、超时分支排空、投递失败和恢复回调重入 ROS 客户端、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join。Service 回归检查取消、超时、迟到响应和 pending request 清理；ROS 时间回归检查暂停、前后跳变及暂停时取消。还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
 
-基础 CTest 使用本机 DDS 域 211–216；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
+基础 CTest 使用本机 DDS 域 211–217；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
 
-目前只提供 Action 结果通道；feedback、Service、Topic、ROS LifecycleNode、仿真时间定时器和实验性 EventsExecutor 尚未适配。
+Topic、ROS LifecycleNode 和实验性 EventsExecutor 尚未适配。

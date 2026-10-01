@@ -1,5 +1,6 @@
 #include <lrclexec/ActionServer.h>
 #include <lrclexec/ExecuteAction.h>
+#include <lrclexec/Service.h>
 #include <lrclexec/SignalStop.h>
 #include <lrclexec/SpinWithScope.h>
 #include <rclcpp/rclcpp.hpp>

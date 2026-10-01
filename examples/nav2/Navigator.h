@@ -38,6 +38,7 @@ struct Resources {
     std::string goalCheckerId;
     std::string progressCheckerId;
     std::function<void(Plan::Result::SharedPtr const &)> pathReady;
+    std::function<void(std::shared_ptr<Follow::Feedback const>)> progress;
 };
 
 // Each iteration awaits one race. when_any drains the losing Action before

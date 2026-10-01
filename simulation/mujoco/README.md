@@ -2,7 +2,7 @@
 
 用真实 Nav2 planner/controller 验证 `examples/nav2/Navigator` 的 sender/receiver 任务组合。程序直接使用 MuJoCo C SDK，默认无界面运行，可启用原生窗口；轮速执行器通过接触与摩擦驱动底盘，位置由物理仿真产生。
 
-`mujoco_bridge` 接收 `/cmd_vel`，发布 `/clock`、`/odom`、TF、`/scan` 和 `/map`。`mujoco_navigator` 等待 Nav2 生命周期进入 ACTIVE，然后调用 `ComputePathToPose` / `FollowPath`，每秒重规划一次。结束或取消后，任务排空，再关闭 Nav2，最后关闭仿真。
+`mujoco_bridge` 接收 `/cmd_vel`，发布 `/clock`、`/odom`、TF、`/scan` 和 `/map`。`mujoco_navigator` 用 Service sender 等待 Nav2 生命周期进入 ACTIVE，然后调用 `ComputePathToPose` / `FollowPath`，每秒仿真时间重规划一次。启动查询与超时使用墙钟，导航重规划使用节点 ROS 时钟；客户端统计 FollowPath feedback，成功回归要求收到进度。结束或取消后，任务排空，再关闭 Nav2，最后关闭仿真。
 
 第一版使用真值里程计和固定的 `map → odom`，尚未引入 AMCL 或 SLAM。地图由同一 MJCF 场景中的静态、轴对齐盒子生成。模型约定两轮半径一致、轮轴沿 Y、执行器 gear=1；当前 `scene.xml` 满足这些约定。
 

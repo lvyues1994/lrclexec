@@ -2,7 +2,7 @@
 <package format="3">
   <name>lrclexec</name>
   <version>0.2.0</version>
-  <description>ROS 2 action, timer and task lifetime adapters for lexec.</description>
+  <description>ROS 2 action, service, timer and task lifetime adapters for lexec.</description>
   <maintainer email="lvyues1994@users.noreply.github.com">lvyues1994</maintainer>
   <license>Unspecified</license>
   <buildtool_depend>ament_cmake</buildtool_depend>

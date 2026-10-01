@@ -272,6 +272,12 @@ def run_case(args, case, domain):
             or "DRAINED" not in output
         ):
             raise RuntimeError(f"navigation did not drain with {terminal}: {output}")
+        feedback = 0
+        for line in output.splitlines():
+            if line.startswith("DRAINED ") and "feedback=" in line:
+                feedback = int(line.split("feedback=", 1)[1])
+        if not canceled and feedback == 0:
+            raise RuntimeError("successful navigation produced no FollowPath feedback")
         completed_at = records(telemetry)[-1]["time"]
 
         def stopped():
@@ -304,6 +310,7 @@ def run_case(args, case, domain):
         outcome = {
             "case": case,
             "terminal": terminal,
+            "feedback": feedback,
             "final": last,
             "max_lateral_offset": max(abs(row["y"]) for row in rows),
         }
