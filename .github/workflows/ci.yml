@@ -91,6 +91,7 @@ jobs:
             -DLRCLEXEC_LEXEC_SOURCE_DIR="$GITHUB_WORKSPACE/.deps/lexec" \
             -DPython3_EXECUTABLE=/usr/bin/python3 \
             -DLRCLEXEC_BUILD_TESTS=ON \
+            -DLRCLEXEC_BUILD_BENCHMARKS=ON \
             -DLRCLEXEC_BUILD_EXAMPLES=OFF \
             -DLRCLEXEC_BUILD_NAV2_EXAMPLE=OFF \
             -DLRCLEXEC_BUILD_MUJOCO_SIM=OFF \

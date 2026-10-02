@@ -3,11 +3,16 @@
   "configurePresets": [
     {"name": "base", "hidden": true, "generator": "Ninja", "binaryDir": "${sourceDir}/build/${presetName}", "cacheVariables": {"CMAKE_EXPORT_COMPILE_COMMANDS": true}},
     {"name": "debug", "inherits": "base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}},
+    {"name": "release-bench", "inherits": "base", "cacheVariables": {
+      "CMAKE_BUILD_TYPE": "Release", "LRCLEXEC_BUILD_BENCHMARKS": true,
+      "LRCLEXEC_BUILD_TESTS": false, "LRCLEXEC_BUILD_EXAMPLES": false,
+      "LRCLEXEC_INSTALL": false}},
     {"name": "asan", "inherits": "debug", "cacheVariables": {"LRCLEXEC_SANITIZE": true}},
     {"name": "asan-clang", "inherits": "asan", "cacheVariables": {"CMAKE_CXX_COMPILER": "clang++"}}
   ],
   "buildPresets": [
     {"name": "debug", "configurePreset": "debug"},
+    {"name": "release-bench", "configurePreset": "release-bench"},
     {"name": "asan", "configurePreset": "asan"},
     {"name": "asan-clang", "configurePreset": "asan-clang"}
   ],

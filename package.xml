@@ -8,12 +8,12 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
+  <depend>rclcpp_lifecycle</depend>
   <depend>example_interfaces</depend>
   <exec_depend>nav2_msgs</exec_depend>
   <test_depend>nav2_msgs</test_depend>
   <test_depend>rosgraph_msgs</test_depend>
   <test_depend>std_msgs</test_depend>
-  <test_depend>rclcpp_lifecycle</test_depend>
   <test_depend>tf2_msgs</test_depend>
   <test_depend>sensor_msgs</test_depend>
   <test_depend>nav_msgs</test_depend>
