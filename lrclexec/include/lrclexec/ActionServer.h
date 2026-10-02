@@ -70,8 +70,10 @@ struct ActionServerState final : std::enable_shared_from_this<ActionServerState<
 
     void bind(std::string const &name) {
         auto const weak = this->weak_from_this();
+        auto interfaces = scheduler.nodeInterfaces();
         server = rclcpp_action::create_server<Action>(
-            scheduler.node().shared_from_this(), name,
+            interfaces.get_node_base_interface(), interfaces.get_node_clock_interface(),
+            interfaces.get_node_logging_interface(), interfaces.get_node_waitables_interface(), name,
             [weak](auto const &, auto const &) {
                 auto state = weak.lock();
                 if (not state or state->closed.load() or not state->scope.get_token().try_associate())
@@ -259,7 +261,8 @@ struct ActionServerState final : std::enable_shared_from_this<ActionServerState<
             else
                 mission->handle->succeed(result);
         } catch (std::exception const &error) {
-            RCLCPP_ERROR(scheduler.node().get_logger(), "Action terminal response failed: %s", error.what());
+            RCLCPP_ERROR(scheduler.nodeInterfaces().get_node_logging_interface()->get_logger(),
+                         "Action terminal response failed: %s", error.what());
         }
     }
 

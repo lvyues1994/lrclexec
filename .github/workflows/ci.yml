@@ -75,7 +75,7 @@ jobs:
             build-essential clang libclang-rt-dev cmake ninja-build \
             python3 libtbb-dev \
             ros-jazzy-ament-cmake ros-jazzy-rclcpp \
-            ros-jazzy-rclcpp-action ros-jazzy-example-interfaces \
+            ros-jazzy-rclcpp-action ros-jazzy-rclcpp-lifecycle ros-jazzy-example-interfaces \
             ros-jazzy-rosgraph-msgs ros-jazzy-std-msgs \
             ros-jazzy-rmw-fastrtps-cpp ros-jazzy-rmw-cyclonedds-cpp
 

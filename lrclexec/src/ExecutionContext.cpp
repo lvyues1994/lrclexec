@@ -11,6 +11,7 @@ namespace {
 
 struct QueueWaitable final : rclcpp::Waitable {
     explicit QueueWaitable(rclcpp::Context::SharedPtr const &context) : guard{context} {}
+    ~QueueWaitable() override { clear_on_ready_callback(); }
 
     void post(std::function<void()> task) {
         auto const lock = std::lock_guard<std::mutex>{mutex};
@@ -42,6 +43,14 @@ struct QueueWaitable final : rclcpp::Waitable {
         return batch;
     }
     std::shared_ptr<void> take_data_by_entity_id(std::size_t) override { return take_data(); }
+    void set_on_ready_callback(std::function<void(std::size_t, int)> callback) override {
+        // One event drains the whole batch, including triggers before registration.
+        guard.set_on_trigger_callback([callback = std::move(callback)](std::size_t) { callback(1, 0); });
+        auto const lock = std::lock_guard<std::mutex>{mutex};
+        if (not tasks.empty())
+            guard.trigger(); // Re-registering after remove_node may have dropped an old event.
+    }
+    void clear_on_ready_callback() override { guard.set_on_trigger_callback(nullptr); }
     void execute(std::shared_ptr<void> const &data) override {
         auto const batch = std::static_pointer_cast<std::deque<std::function<void()>>>(data);
         std::exception_ptr failure;
@@ -64,21 +73,31 @@ struct QueueWaitable final : rclcpp::Waitable {
 };
 
 struct ExecutionContextImpl final : ExecutionContext {
-    explicit ExecutionContextImpl(std::shared_ptr<rclcpp::Node> node_)
-        : rosNode{std::move(node_)},
-          group{rosNode->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive)},
-          queue{std::make_shared<QueueWaitable>(rosNode->get_node_base_interface()->get_context())} {
-        rosNode->get_node_waitables_interface()->add_waitable(queue, group);
+    ExecutionContextImpl(std::shared_ptr<void> owner_, NodeInterfaces interfaces_,
+                         std::shared_ptr<rclcpp::Node> ordinaryNode_)
+        : owner{std::move(owner_)}, interfaces{std::move(interfaces_)},
+          ordinaryNode{std::move(ordinaryNode_)},
+          group{interfaces.get_node_base_interface()->create_callback_group(
+              rclcpp::CallbackGroupType::MutuallyExclusive)},
+          queue{std::make_shared<QueueWaitable>(interfaces.get_node_base_interface()->get_context())} {
+        interfaces.get_node_waitables_interface()->add_waitable(queue, group);
     }
     ~ExecutionContextImpl() override {
-        rosNode->get_node_waitables_interface()->remove_waitable(queue, group);
+        interfaces.get_node_waitables_interface()->remove_waitable(queue, group);
     }
     void post(std::function<void()> task) override { queue->post(std::move(task)); }
-    rclcpp::Node &node() const noexcept override { return *rosNode; }
+    rclcpp::Node &node() const override {
+        if (not ordinaryNode)
+            throw std::logic_error{"lrclexec: node() requires rclcpp::Node; use nodeInterfaces()"};
+        return *ordinaryNode;
+    }
+    NodeInterfaces nodeInterfaces() const override { return interfaces; }
     rclcpp::CallbackGroup::SharedPtr callbackGroup() const noexcept override { return group; }
 
   private:
-    std::shared_ptr<rclcpp::Node> rosNode;
+    std::shared_ptr<void> owner;
+    NodeInterfaces interfaces;
+    std::shared_ptr<rclcpp::Node> ordinaryNode;
     rclcpp::CallbackGroup::SharedPtr group;
     std::shared_ptr<QueueWaitable> queue;
 };
@@ -89,7 +108,14 @@ std::shared_ptr<ExecutionContext> makeExecutionContext(std::shared_ptr<rclcpp::N
     if (not node) {
         throw std::invalid_argument{"lrclexec: scheduler needs a node"};
     }
-    return std::make_shared<ExecutionContextImpl>(std::move(node));
+    auto interfaces = NodeInterfaces{*node};
+    return makeExecutionContext(node, std::move(interfaces), node);
+}
+
+std::shared_ptr<ExecutionContext> makeExecutionContext(std::shared_ptr<void> owner, NodeInterfaces interfaces,
+                                                       std::shared_ptr<rclcpp::Node> ordinaryNode) {
+    return std::make_shared<ExecutionContextImpl>(std::move(owner), std::move(interfaces),
+                                                  std::move(ordinaryNode));
 }
 
 } // namespace lrclexec::detail

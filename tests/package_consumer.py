@@ -35,6 +35,7 @@ with tempfile.TemporaryDirectory(prefix="lrclexec-install-") as directory:
         ("bundled", [], ["consumer"]),
         ("provider", [f"-DLEXEC_PROVIDER_SOURCE={lexec}"], ["consumer"]),
         ("siblings", ["-DCONSUMER_SIBLINGS=ON"], ["first/first", "second/second"]),
+        ("lifecycle", ["-DCONSUMER_LIFECYCLE=ON"], ["lifecycle_consumer"]),
     ):
         consumer_build = root / name
         prefixes = (

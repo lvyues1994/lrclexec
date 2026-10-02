@@ -55,8 +55,9 @@ struct TopicState final : std::enable_shared_from_this<TopicState<Message, Recei
                 if (not stopped and not error) {
                     auto options = rclcpp::SubscriptionOptions{};
                     options.callback_group = context->callbackGroup();
+                    auto interfaces = context->nodeInterfaces();
                     subscription = rclcpp::create_subscription<Message>(
-                        context->node(), topic, qos,
+                        interfaces, topic, qos,
                         [weak = this->weak_from_this()](Message const &message) {
                             if (auto state = weak.lock())
                                 state->messageReady(message);
@@ -132,7 +133,7 @@ struct TopicState final : std::enable_shared_from_this<TopicState<Message, Recei
             try {
                 // A failed stop post may complete outside the executor while
                 // its wait set still holds a temporary subscription owner.
-                context->node().get_node_base_interface()->trigger_notify_guard_condition();
+                context->nodeInterfaces().get_node_base_interface()->trigger_notify_guard_condition();
             } catch (...) {
                 lexec::set_error(std::move(*receiver), std::current_exception());
                 return;

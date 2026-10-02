@@ -4,7 +4,7 @@
 
 ## 构建
 
-依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`，ROS 时间回归使用 `rosgraph_msgs`，Topic 回归使用 `std_msgs`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入并由 CI 固定的 lexec 提交为 `e032d551d53d87209b83d07fd172890461db643b`。
+依赖 CMake 3.25+、Ninja、ROS 2 Jazzy 和 lexec 源码。测试及基础示例额外使用 `example_interfaces`，ROS 时间回归使用 `rosgraph_msgs`，Topic 回归使用 `std_msgs`，生命周期回归使用 `rclcpp_lifecycle`；信号及安装回归使用 uv 执行标准库 Python 脚本。当前接入并由 CI 固定的 lexec 提交为 `e032d551d53d87209b83d07fd172890461db643b`。
 
 ```bash
 cd /home/lvyues/code/rclexec/lrclexec
@@ -58,6 +58,8 @@ ros2 run lrclexec navigation_example
 | 入口 | 行为 |
 | --- | --- |
 | `TimerScheduler{node}` | 创建 executor 队列及专用互斥 callback group；副本共享这两项资源 |
+| `TimerScheduler{lifecycleNode}` | 使用 LifecycleNode 的原生节点接口，并持有完整节点；通用库无需链接 rclcpp_lifecycle |
+| `scheduler.nodeInterfaces()` | 取得 base、clock、logging、parameters、timers、topics、waitables 接口，兼容两种节点 |
 | `TimerScheduler{node, TimerClock::node}` | 定时器使用节点时钟；`use_sim_time=true` 时跟随 `/clock` |
 | `lexec::schedule(scheduler)` | 在该 executor 上异步完成 |
 | `schedule_after(scheduler, duration)` | 使用所选时钟等待，默认是 steady wall timer；非正时长也经队列异步完成 |
@@ -70,6 +72,10 @@ ros2 run lrclexec navigation_example
 | `SignalStop{stopSource}` | 在普通线程接收 SIGINT/SIGTERM 并请求停止；排空期间继续接收重复信号 |
 
 头文件分别为 `TimerScheduler.h`、`Service.h`、`Topic.h`、`ExecuteAction.h`、`ActionServer.h`、`SpinWithScope.h`、`SignalStop.h`，均位于 `lrclexec/` 下。
+
+普通 Node 的构造、`scheduler.node()` 返回类型及行为保留；访问器现可抛异常，移除了 `noexcept`。对 LifecycleNode 调度器调用 `node()` 会抛 `logic_error`，应使用 `nodeInterfaces()` 或应用持有的 LifecycleNode。自定义 `ExecutionContext` 默认通过 `node()` 提供接口；包装 LifecycleNode 时须覆盖 `nodeInterfaces()` 并转发内部接口。
+
+LifecycleNode 的 unconfigured、inactive 状态允许这些普通定时器、订阅、Service 和 Action 继续执行；适配层不自动注册生命周期回调。若 deactivate/shutdown 要停止业务，应用须显式请求 stop、关闭并排空 scope，之后释放资源；重新激活时创建新的任务 scope。不要在依赖同一 executor 的生命周期回调里阻塞等待 join。
 
 节点时钟定时器沿用 ROS 原生跳变规则：到期前暂停 `/clock` 会暂停等待，前跳越过截止时刻可立即到期；后跳早于 timer 的 `last_call_time` 时从新时间重新计时。首条 `/clock` 前节点时间为零，首次时间跳变也可能触发到期。停止请求和 `schedule()` 的队列投递不依赖时钟推进。
 
@@ -137,7 +143,9 @@ rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
 
 本机 Jazzy 的原生 Action client/server 析构会移除 callback group 中的 waitable；与 executor 收集实体并发时可能自锁。应用须持有客户端、服务端及其借用对象，到 executor 停止且 spin 线程 join 之后再释放。
 
-节点必须加入持续运行的 executor。支持标准 `SingleThreadedExecutor` / `MultiThreadedExecutor`；不要在 executor 回调里对依赖同一 executor 的 sender 调用阻塞 `sync_wait`，也不要同时对一个 executor 调用 `spin` 和 `spin_with_scope`。收束期间 ROS context 必须保持有效。远端若拒绝取消或不返回终态，join 会继续等待。
+节点必须加入持续运行的 executor；LifecycleNode 使用 `executor.add_node(scheduler.nodeInterfaces().get_node_base_interface())`。支持标准 `SingleThreadedExecutor` / `MultiThreadedExecutor`，以及默认单线程、同线程执行定时器的实验性 `rclcpp::experimental::executors::EventsExecutor`。不要在 executor 回调里对依赖同一 executor 的 sender 调用阻塞 `sync_wait`，也不要同时对一个 executor 调用 `spin` 和 `spin_with_scope`。收束期间 ROS context 必须保持有效。远端若拒绝取消或不返回终态，join 会继续等待。
+
+EventsExecutor 回归使用默认 `SimpleEventsQueue` 和 steady/wall 定时器。Jazzy 的 [ROS 仿真时钟问题](https://github.com/ros2/rclcpp/issues/2480) 尚不在支持范围内；默认事件队列也不保证内存有界。本机 28.1.22 还复现了原生定时器的手动 spin 边界：取消后仍持有堆顶 timer，可能阻挡其他 timer，释放它后恢复。使用 `spin_with_scope` 时应及时释放应用取消的原生 timer；本库单次等待会取消并释放自己的 timer。
 
 ## 导航模拟与测试
 
@@ -168,12 +176,10 @@ LD_LIBRARY_PATH="$NAV2_PREFIX/lib:$LD_LIBRARY_PATH" \
 
 回归覆盖定时器到期/取消竞争、接受前取消、取消被拒后成功、远端暂不返回终态时 join 等待、feedback 异常及完成竞态、拒绝与 abort 载荷、超时分支排空、投递失败和恢复回调重入 ROS 客户端、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join。Service 回归检查取消、超时、迟到响应和 pending request 清理；ROS 时间回归检查暂停、前后跳变及暂停时取消。还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
 
-Topic 回归分别使用单线程和四线程 executor，并检查普通 DDS 与进程内通信、首条消息、独立订阅、取消/超时、晚到闭包、创建/投递异常、transient-local/SensorDataQoS，以及借用消息在回调结束后的所有权。
+Topic 回归分别使用单线程、四线程及 EventsExecutor，并检查普通 DDS 与进程内通信、首条消息、独立订阅、取消/超时、晚到闭包、创建/投递异常、transient-local/SensorDataQoS，以及借用消息在回调结束后的所有权。LifecycleNode 回归检查完整节点的所有权、各生命周期状态下的通信、取消清理及标准 executor 下的 ROS 时钟；EventsExecutor 额外检查队列注册/重新注册、批内异常恢复、Service 迟到响应、scope 异步清理及重复信号退出。安装消费回归包含独立 LifecycleNode 应用。
 
-基础 CTest 使用本机 DDS 域 211–219；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
+基础 CTest 使用本机 DDS 域 211–219 和 221–227；MuJoCo/Nav2 回归使用域 220。客户端路径资源的界限不代表整个 ROS/DDS 进程内存恒定：服务端会在超时前缓存终态结果。
 
 ## CI
 
 [GitHub Actions 配置](.github/workflows/ci.yml) 在 push、pull request 或手动触发时执行三个 Ubuntu 24.04 / Jazzy 作业：GCC Debug + Fast DDS、Clang ASan/UBSan + Fast DDS、GCC Debug + Cyclone DDS。Actions、lexec、uv 和 ROS APT 源配置包固定版本；作业执行通用库回归及移动安装目录后的消费测试，Nav2/MuJoCo 单独在本地回归。
-
-ROS LifecycleNode 和实验性 EventsExecutor 尚未适配。

@@ -76,19 +76,19 @@ template <class Receiver> struct TimerState final : std::enable_shared_from_this
   private:
     void arm() {
         auto const weak = this->weak_from_this();
-        auto &node = context->node();
+        auto interfaces = context->nodeInterfaces();
         auto callback = [weak] {
             if (auto state = weak.lock())
                 state->expired();
         };
         if (clock)
             timer = rclcpp::create_timer(clock, delay, callback, context->callbackGroup(),
-                                         node.get_node_base_interface().get(),
-                                         node.get_node_timers_interface().get(), false);
+                                         interfaces.get_node_base_interface().get(),
+                                         interfaces.get_node_timers_interface().get(), false);
         else
             timer = rclcpp::create_wall_timer(delay, callback, context->callbackGroup(),
-                                              node.get_node_base_interface().get(),
-                                              node.get_node_timers_interface().get(), false);
+                                              interfaces.get_node_base_interface().get(),
+                                              interfaces.get_node_timers_interface().get(), false);
         timer->reset();
     }
     void expired() noexcept {
@@ -195,7 +195,15 @@ struct TimerScheduler {
     using scheduler_concept = lexec::scheduler_t;
     explicit TimerScheduler(std::shared_ptr<rclcpp::Node> node, TimerClock timerClock = TimerClock::steady)
         : context{detail::makeExecutionContext(std::move(node))},
-          clock{timerClock == TimerClock::node ? context->node().get_clock() : nullptr} {}
+          clock{timerClock == TimerClock::node
+                    ? context->nodeInterfaces().get_node_clock_interface()->get_clock()
+                    : nullptr} {}
+    template <class Node, std::enable_if_t<not std::is_base_of_v<detail::ExecutionContext, Node>, int> = 0>
+    explicit TimerScheduler(std::shared_ptr<Node> node, TimerClock timerClock = TimerClock::steady)
+        : context{detail::makeExecutionContext(std::move(node))},
+          clock{timerClock == TimerClock::node
+                    ? context->nodeInterfaces().get_node_clock_interface()->get_clock()
+                    : nullptr} {}
     explicit TimerScheduler(std::shared_ptr<detail::ExecutionContext> context_,
                             rclcpp::Clock::SharedPtr clock_ = {})
         : context{std::move(context_)}, clock{std::move(clock_)} {}
@@ -203,7 +211,8 @@ struct TimerScheduler {
     TimerSender schedule_after(std::chrono::nanoseconds const delay) const noexcept {
         return {context, delay, clock};
     }
-    rclcpp::Node &node() const noexcept { return context->node(); }
+    rclcpp::Node &node() const { return context->node(); }
+    detail::NodeInterfaces nodeInterfaces() const { return context->nodeInterfaces(); }
     rclcpp::CallbackGroup::SharedPtr callbackGroup() const noexcept { return context->callbackGroup(); }
     std::shared_ptr<detail::ExecutionContext> executionContext() const noexcept { return context; }
     friend bool operator==(TimerScheduler const &a, TimerScheduler const &b) noexcept {

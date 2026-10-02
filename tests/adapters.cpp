@@ -6,6 +6,7 @@
 #include <iostream>
 #include <lrclexec/Service.h>
 #include <mutex>
+#include <rclcpp/experimental/executors/events_executor/events_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <thread>
@@ -27,9 +28,14 @@ template <class Predicate> void waitUntil(Predicate predicate) {
     }
 }
 struct Fixture {
-    Fixture() : scheduler{node} {
-        executor.add_node(node);
-        executor.add_node(peer);
+    explicit Fixture(bool events = false) : scheduler{node} {
+        if (events)
+            executor = std::make_unique<rclcpp::experimental::executors::EventsExecutor>();
+        else
+            executor =
+                std::make_unique<rclcpp::executors::MultiThreadedExecutor>(rclcpp::ExecutorOptions{}, 4);
+        executor->add_node(node);
+        executor->add_node(peer);
         server = peer->create_service<Service>(
             "lrclexec_adapter_service",
             [this](std::shared_ptr<rmw_request_id_t> header, Service::Request::SharedPtr request) {
@@ -45,11 +51,11 @@ struct Fixture {
                 }
             });
         client = node->create_client<Service>("lrclexec_adapter_service");
-        spinner = std::thread{[this] { executor.spin(); }};
+        spinner = std::thread{[this] { executor->spin(); }};
         check(client->wait_for_service(3s), "service discovery failed");
     }
     ~Fixture() {
-        executor.cancel();
+        executor->cancel();
         spinner.join();
     }
     auto call(rclcpp::Client<Service>::SharedPtr target = {}) {
@@ -77,7 +83,7 @@ struct Fixture {
     rclcpp::Node::SharedPtr node = std::make_shared<rclcpp::Node>("lrclexec_adapters");
     rclcpp::Node::SharedPtr peer = std::make_shared<rclcpp::Node>("lrclexec_adapters_peer");
     lrclexec::TimerScheduler scheduler;
-    rclcpp::executors::MultiThreadedExecutor executor{rclcpp::ExecutorOptions{}, 4};
+    std::unique_ptr<rclcpp::Executor> executor;
     rclcpp::Service<Service>::SharedPtr server;
     rclcpp::Client<Service>::SharedPtr client;
     std::thread spinner;
@@ -247,7 +253,7 @@ void queuedResponseAfterStopTest(Fixture &fixture) {
 void rosTimeTests(Fixture &fixture) {
     auto options = rclcpp::NodeOptions{}.parameter_overrides({rclcpp::Parameter{"use_sim_time", true}});
     auto node = std::make_shared<rclcpp::Node>("lrclexec_clock_test", options);
-    fixture.executor.add_node(node);
+    fixture.executor->add_node(node);
     auto scheduler = lrclexec::TimerScheduler{node, lrclexec::TimerClock::node};
     auto publisher = fixture.peer->create_publisher<rosgraph_msgs::msg::Clock>("/clock", rclcpp::ClockQoS{});
     waitUntil([&] { return publisher->get_subscription_count() > 0; });
@@ -294,7 +300,7 @@ void rosTimeTests(Fixture &fixture) {
         check(paused and resetWaited and ready, "ROS timer pause/jump behavior failed");
         check(outcome == (scenario == 2 ? 0 : 1), "ROS timer completion kind was wrong");
     }
-    fixture.executor.remove_node(node);
+    fixture.executor->remove_node(node);
 }
 } // namespace
 
@@ -302,10 +308,12 @@ int main(int argc, char **argv) {
     rclcpp::init(argc, argv, rclcpp::InitOptions{}, rclcpp::SignalHandlerOptions::None);
     try {
         {
-            Fixture fixture;
+            auto const events = argc > 1 and std::string{argv[1]} == "events";
+            Fixture fixture{events};
             serviceTests(fixture);
             queuedResponseAfterStopTest(fixture);
-            rosTimeTests(fixture);
+            if (not events)
+                rosTimeTests(fixture);
         }
         rclcpp::shutdown();
         std::cout << "Service and ROS time adapters passed\n";

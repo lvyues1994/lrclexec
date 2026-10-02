@@ -9,7 +9,7 @@ import time
 
 
 def check_process(executable, signals):
-    args = [executable] + ([] if signals else ["--normal"])
+    args = [executable, *sys.argv[2:]] + ([] if signals else ["--normal"])
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         with selectors.DefaultSelector() as selector:

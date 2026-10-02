@@ -30,6 +30,34 @@ foreach(mode IN ITEMS single multi)
     set_tests_properties(topic_${mode}_executor PROPERTIES TIMEOUT 45
         ENVIRONMENT "ROS_DOMAIN_ID=${topic_domain};ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-topic-${mode}-logs")
 endforeach()
+add_test(NAME topic_events_executor COMMAND lrclexec_topic_tests events)
+set_tests_properties(topic_events_executor PROPERTIES TIMEOUT 45
+    ENVIRONMENT "ROS_DOMAIN_ID=221;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-topic-events-logs")
+
+find_package(rclcpp_lifecycle REQUIRED)
+add_executable(lrclexec_node_adapter_tests node_adapters.cpp)
+target_link_libraries(lrclexec_node_adapter_tests PRIVATE lrclexec::lrclexec
+    rclcpp_lifecycle::rclcpp_lifecycle example_interfaces::example_interfaces__rosidl_typesupport_cpp
+    std_msgs::std_msgs__rosidl_typesupport_cpp rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp)
+target_compile_options(lrclexec_node_adapter_tests PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+foreach(mode IN ITEMS single multi events)
+    if(mode STREQUAL "single")
+        set(node_domain 222)
+    elseif(mode STREQUAL "multi")
+        set(node_domain 223)
+    else()
+        set(node_domain 224)
+    endif()
+    add_test(NAME lifecycle_${mode}_executor COMMAND lrclexec_node_adapter_tests ${mode})
+    set_tests_properties(lifecycle_${mode}_executor PROPERTIES TIMEOUT 45
+        ENVIRONMENT "ROS_DOMAIN_ID=${node_domain};ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-lifecycle-${mode}-logs")
+endforeach()
+add_test(NAME events_executor_adapters COMMAND lrclexec_node_adapter_tests events-node)
+set_tests_properties(events_executor_adapters PROPERTIES TIMEOUT 45
+    ENVIRONMENT "ROS_DOMAIN_ID=225;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-events-adapter-logs")
+add_test(NAME service_events_executor COMMAND lrclexec_adapter_tests events)
+set_tests_properties(service_events_executor PROPERTIES TIMEOUT 30
+    ENVIRONMENT "ROS_DOMAIN_ID=226;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-service-events-logs")
 
 add_executable(lrclexec_signal_unit signal_unit.cpp)
 target_link_libraries(lrclexec_signal_unit PRIVATE lrclexec::lrclexec)
@@ -44,6 +72,10 @@ add_test(NAME signal_scope_shutdown COMMAND ${UV_EXECUTABLE} run --no-project --
     ${CMAKE_CURRENT_SOURCE_DIR}/signal_shutdown.py $<TARGET_FILE:lrclexec_shutdown_fixture>)
 set_tests_properties(signal_scope_shutdown PROPERTIES TIMEOUT 30
     ENVIRONMENT "ROS_DOMAIN_ID=213;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-shutdown-logs;UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+add_test(NAME signal_events_shutdown COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
+    ${CMAKE_CURRENT_SOURCE_DIR}/signal_shutdown.py $<TARGET_FILE:lrclexec_shutdown_fixture> --events)
+set_tests_properties(signal_events_shutdown PROPERTIES TIMEOUT 30
+    ENVIRONMENT "ROS_DOMAIN_ID=227;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/lrclexec-events-shutdown-logs;UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
 if(LRCLEXEC_INSTALL AND LRCLEXEC_BUNDLE_LEXEC_HEADERS)
     add_test(NAME installed_package_consumer COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
         ${CMAKE_CURRENT_SOURCE_DIR}/package_consumer.py ${CMAKE_COMMAND} ${PROJECT_BINARY_DIR}

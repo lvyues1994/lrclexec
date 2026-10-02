@@ -4,6 +4,7 @@
 #include <future>
 #include <iostream>
 #include <lrclexec/Topic.h>
+#include <rclcpp/experimental/executors/events_executor/events_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <thread>
@@ -56,13 +57,15 @@ struct Receiver {
 };
 
 struct Fixture {
-    Fixture(bool multi, bool ipc)
+    Fixture(std::string const &mode, bool ipc)
         : node{std::make_shared<rclcpp::Node>("lrclexec_topic_client",
                                               rclcpp::NodeOptions{}.use_intra_process_comms(ipc))},
           peer{std::make_shared<rclcpp::Node>("lrclexec_topic_peer",
                                               rclcpp::NodeOptions{}.use_intra_process_comms(ipc))},
           scheduler{node} {
-        if (multi)
+        if (mode == "events")
+            executor = std::make_unique<rclcpp::experimental::executors::EventsExecutor>();
+        else if (mode == "multi")
             executor =
                 std::make_unique<rclcpp::executors::MultiThreadedExecutor>(rclcpp::ExecutorOptions{}, 4);
         else
@@ -383,11 +386,11 @@ void loanOwnershipTest(Fixture &fixture) {
 } // namespace
 
 int main(int argc, char **argv) {
-    auto const multi = argc > 1 and std::string{argv[1]} == "multi";
+    auto const mode = argc > 1 ? std::string{argv[1]} : "single";
     rclcpp::init(argc, argv, rclcpp::InitOptions{}, rclcpp::SignalHandlerOptions::None);
     try {
         for (bool ipc : {false, true}) {
-            Fixture fixture{multi, ipc};
+            Fixture fixture{mode, ipc};
             std::cerr << "basic checks ipc=" << ipc << '\n';
             basicTests(fixture);
             std::cerr << "stop checks\n";

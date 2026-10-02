@@ -87,15 +87,15 @@ struct ServiceState final : std::enable_shared_from_this<ServiceState<Service, R
     }
     void armDiscovery() {
         auto const weak = this->weak_from_this();
-        auto &node = context->node();
+        auto interfaces = context->nodeInterfaces();
         discoveryTimer = rclcpp::create_wall_timer(
             std::chrono::milliseconds{20},
             [weak] {
                 if (auto state = weak.lock())
                     state->poll();
             },
-            context->callbackGroup(), node.get_node_base_interface().get(),
-            node.get_node_timers_interface().get());
+            context->callbackGroup(), interfaces.get_node_base_interface().get(),
+            interfaces.get_node_timers_interface().get());
     }
     void send() {
         if (discoveryTimer) {

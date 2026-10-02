@@ -7,6 +7,7 @@
 #include <lrclexec/SignalStop.h>
 #include <lrclexec/SpinWithScope.h>
 #include <memory>
+#include <rclcpp/experimental/executors/events_executor/events_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/create_client.hpp>
 #include <string_view>
@@ -23,7 +24,12 @@ struct CleanupResource {
 int main(int argc, char **argv) {
     auto stop = lexec::inplace_stop_source{};
     auto signals = lrclexec::SignalStop{stop};
-    auto const normal = argc > 1 and std::string_view{argv[1]} == "--normal";
+    auto normal = false;
+    auto events = false;
+    for (int i = 1; i < argc; ++i) {
+        normal = normal or std::string_view{argv[i]} == "--normal";
+        events = events or std::string_view{argv[i]} == "--events";
+    }
     auto options = rclcpp::InitOptions{};
     options.shutdown_on_signal = false;
     rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
@@ -68,9 +74,13 @@ int main(int argc, char **argv) {
                         stop.request_stop();
                     });
         lexec::spawn(std::move(work), scope.get_token());
-        auto executor = rclcpp::executors::SingleThreadedExecutor{};
-        executor.add_node(node);
-        lrclexec::spin_with_scope(executor, scope, stop.get_token());
+        std::unique_ptr<rclcpp::Executor> executor;
+        if (events)
+            executor = std::make_unique<rclcpp::experimental::executors::EventsExecutor>();
+        else
+            executor = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+        executor->add_node(node);
+        lrclexec::spin_with_scope(*executor, scope, stop.get_token());
         if (live.load() != 0 or failed or signals.error() or (not normal and (not cleaned or not canceled)))
             throw std::runtime_error{"exit did not drain the accepted action and its resources"};
         if (not node->get_node_base_interface()->get_context()->is_valid())
