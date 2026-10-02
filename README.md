@@ -145,7 +145,7 @@ rclcpp::init(argc, argv, options, rclcpp::SignalHandlerOptions::None);
 
 节点必须加入持续运行的 executor；LifecycleNode 使用 `executor.add_node(scheduler.nodeInterfaces().get_node_base_interface())`。支持标准 `SingleThreadedExecutor` / `MultiThreadedExecutor`；`rclcpp::experimental::executors::EventsExecutor` 提供实验性接入和短期回归，本机 Jazzy 的长期稳定性与连续动态实体替换仍有未解决限制。不要在 executor 回调里对依赖同一 executor 的 sender 调用阻塞 `sync_wait`，也不要同时对一个 executor 调用 `spin` 和 `spin_with_scope`。收束期间 ROS context 必须保持有效。远端若拒绝取消或不返回终态，join 会继续等待。
 
-EventsExecutor 回归使用默认 `SimpleEventsQueue` 和 steady/wall 定时器。Jazzy 的 [ROS 仿真时钟问题](https://github.com/ros2/rclcpp/issues/2480) 尚不在支持范围内；默认事件队列也不保证内存有界。本机 28.1.22 还复现了原生定时器的手动 spin 边界：取消后仍持有堆顶 timer，可能阻挡其他 timer，释放它后恢复。使用 `spin_with_scope` 时应及时释放应用取消的原生 timer；本库单次等待会取消并释放自己的 timer。连续销毁/创建 timer 时地址复用还可能留下 SDK 中旧的失效实体缓存，导致清理 timer 不再到期，见 [Lifecycle 诊断](examples/lifecycle/README.md#eventsexecutor-已知限制)。混合长压另有 Topic 超时，其原因尚未确认。
+EventsExecutor 回归使用默认 `SimpleEventsQueue` 和 steady/wall 定时器。Jazzy 的 [ROS 仿真时钟问题](https://github.com/ros2/rclcpp/issues/2480) 尚不在支持范围内；默认事件队列也不保证内存有界。本机 28.1.22 还复现了原生定时器的手动 spin 边界：取消后仍持有堆顶 timer，可能阻挡其他 timer，释放它后恢复。使用 `spin_with_scope` 时应及时释放应用取消的原生 timer；本库单次等待会取消并释放自己的 timer。连续销毁/创建 timer 时地址复用还可能留下 SDK 中旧的失效实体缓存，导致清理 timer 不再到期，见 [Lifecycle 诊断](examples/lifecycle/README.md#eventsexecutor-已知限制)。原生订阅也已独立复现同地址复用后通知未注册，见 [Topic SDK 诊断](benchmarks/EVENTS.md)；历史混合长压的 Topic 超时缺少当时的实体记录，尚不能证明同因。
 
 ## Lifecycle 示例与测量
 

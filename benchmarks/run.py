@@ -5,10 +5,10 @@ import datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
 import statistics
 import subprocess
+from pathlib import Path
 
 
 def read(path):
@@ -19,7 +19,7 @@ def read(path):
 
 
 def command(args):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -45,7 +45,7 @@ def save_report(output, runs, failure=None):
 def run(binary, output, name, command_line, environment, timeout):
     try:
         result = subprocess.run([str(binary), *command_line], env=environment,
-                                capture_output=True, text=True, timeout=timeout)
+                                capture_output=True, text=True, timeout=timeout, check=False)
         stdout, stderr, code = result.stdout, result.stderr, result.returncode
     except subprocess.TimeoutExpired as error:
         def text(value):
@@ -60,7 +60,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--stage", choices=("baseline", "soak"), default="baseline")
+    parser.add_argument("--stage", choices=("baseline", "soak", "action"), default="baseline")
     parser.add_argument("--seconds", type=positive, default=10)
     parser.add_argument("--warmup", type=int, choices=range(61), default=2)
     parser.add_argument("--repeats", type=int, choices=range(1, 11), default=3)
@@ -68,6 +68,8 @@ def main():
                         default=("single", "multi", "events"))
     parser.add_argument("--domain", type=int, choices=range(180, 201), default=180)
     args = parser.parse_args()
+    if args.stage == "action" and "events" in args.executors:
+        parser.error("Action stress supports --executors single multi")
     binary = args.binary.resolve(strict=True)
     args.output.mkdir(parents=True, exist_ok=False)
     repository = Path(__file__).resolve().parents[1]
@@ -93,12 +95,15 @@ def main():
         "cmake_cache": read(binary.parents[1] / "CMakeCache.txt"),
         "options": {key: str(value) if isinstance(value, Path) else value
                     for key, value in vars(args).items()},
-        "workload": "shared scheduler with one mutually exclusive callback group",
+        "workload": "four independent schedulers and callback groups" if args.stage == "action"
+                    else "shared scheduler with one mutually exclusive callback group",
     }
     (args.output / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
     runs = []
     profiles = ((1, 1), (4, 256)) if args.stage == "baseline" else ((4, 32),)
     modes = ("post", "schedule") if args.stage == "baseline" else ("mixed",)
+    if args.stage == "action":
+        profiles, modes = ((4, 12),), ("action",)
     repetitions = args.repeats if args.stage == "baseline" else 1
     for executor_index, executor in enumerate(args.executors):
         for producers, window in profiles:
@@ -108,10 +113,12 @@ def main():
                     env = {**os.environ, "ROS_DOMAIN_ID": str(args.domain + executor_index),
                            "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST", "RCUTILS_LOGGING_USE_STDOUT": "0",
                            "ROS_LOG_DIR": str(args.output.resolve() / "ros-logs")}
-                    stdout, code = run(binary, args.output, name,
-                                       ["--executor", executor, "--mode", mode, "--seconds", str(args.seconds),
+                    arguments = ["--executor", executor, "--mode", mode, "--seconds", str(args.seconds),
                                         "--warmup", str(args.warmup), "--producers", str(producers),
-                                        "--window", str(window)], env, args.seconds + args.warmup + 25)
+                                        "--window", str(window)]
+                    if args.stage == "action":
+                        arguments = ["--executor", executor, "--seconds", str(args.seconds), "--lanes", str(producers)]
+                    stdout, code = run(binary, args.output, name, arguments, env, args.seconds + args.warmup + 25)
                     try:
                         records = [json.loads(line) for line in stdout.splitlines()]
                         summaries = [record for record in records if record["type"] == "summary"
@@ -126,7 +133,7 @@ def main():
                         raise SystemExit(f"failed: {name}; inspect {args.output}")
                     summary = summaries[0]
                     samples = [record["rss_kib"] for record in records if record["type"] == "sample"
-                               and record["phase"] == "measure" and record["rss_kib"] is not None]
+                               and record.get("phase", "measure") == "measure" and record["rss_kib"] is not None]
                     summary.update({"file": f"{name}.jsonl", "domain": int(env["ROS_DOMAIN_ID"]),
                                     "rss_first_kib": samples[0] if samples else None,
                                     "rss_last_kib": samples[-1] if samples else None,

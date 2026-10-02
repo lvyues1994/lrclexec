@@ -1,12 +1,14 @@
 #include "Physics.h"
 #include "Viewer.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <fstream>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <iomanip>
 #include <lrclexec/SignalStop.h>
-#include <lrclexec/SpinWithScope.h>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -37,6 +39,18 @@ class Bridge {
         if (not telemetry)
             throw std::runtime_error{"cannot open physics telemetry"};
         telemetry << std::setprecision(9);
+        auto const localizationMode = node.declare_parameter<std::string>("localization", "amcl");
+        if (localizationMode != "amcl" and localizationMode != "truth")
+            throw std::invalid_argument{"localization must be amcl or truth"};
+        if (localizationMode == "amcl") {
+            localization.open(node.declare_parameter<std::string>("localization_log", "localization.jsonl"));
+            if (not localization)
+                throw std::runtime_error{"cannot open localization telemetry"};
+            localization << std::setprecision(12);
+            estimate = node.create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+                "amcl_pose", rclcpp::QoS{10}.transient_local(),
+                [this](geometry_msgs::msg::PoseWithCovarianceStamped const &message) { score(message); });
+        }
         clock = node.create_publisher<rosgraph_msgs::msg::Clock>("clock", 10);
         odom = node.create_publisher<nav_msgs::msg::Odometry>("odom", 10);
         scan = node.create_publisher<sensor_msgs::msg::LaserScan>("scan", rclcpp::SensorDataQoS{});
@@ -54,7 +68,8 @@ class Bridge {
         publishMap(node.declare_parameter<bool>("map_includes_obstacle", true));
         auto fixed = tf2_msgs::msg::TFMessage{};
         auto const zeroStamp = builtin_interfaces::msg::Time{};
-        fixed.transforms.push_back(transform("map", "odom", zeroStamp));
+        if (localizationMode == "truth")
+            fixed.transforms.push_back(transform("map", "odom", zeroStamp));
         fixed.transforms.push_back(transform("base_link", "laser", zeroStamp));
         fixed.transforms.back().transform.translation.z = .2;
         staticTf->publish(fixed);
@@ -69,6 +84,28 @@ class Bridge {
     }
 
   private:
+    void score(geometry_msgs::msg::PoseWithCovarianceStamped const &message) {
+        auto const stamp = rclcpp::Time{message.header.stamp}.nanoseconds();
+        auto const sample = std::lower_bound(history.begin(), history.end(), stamp,
+                                             [](auto const &entry, auto time) { return entry.first < time; });
+        if (sample == history.end() or sample->first != stamp or message.header.frame_id != "map") {
+            localization << "{\"matched\":false,\"stamp_ns\":" << stamp << "}" << std::endl;
+            return;
+        }
+        auto const &truth = sample->second;
+        auto const &pose = message.pose.pose;
+        auto const &q = pose.orientation;
+        auto const yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+        auto const yawError = std::remainder(yaw - truth.yaw, 2 * std::acos(-1.0));
+        localization << "{\"matched\":true,\"time\":" << truth.time << ",\"x\":" << pose.position.x
+                     << ",\"y\":" << pose.position.y << ",\"yaw\":" << yaw << ",\"truth_x\":" << truth.x
+                     << ",\"truth_y\":" << truth.y << ",\"truth_yaw\":" << truth.yaw
+                     << ",\"xy_error\":" << std::hypot(pose.position.x - truth.x, pose.position.y - truth.y)
+                     << ",\"yaw_error\":" << std::abs(yawError)
+                     << ",\"variance_x\":" << message.pose.covariance[0]
+                     << ",\"variance_y\":" << message.pose.covariance[7]
+                     << ",\"variance_yaw\":" << message.pose.covariance[35] << "}" << std::endl;
+    }
     void publishMap(bool const includeObstacle) {
         auto const source = physics->map(includeObstacle);
         auto message = nav_msgs::msg::OccupancyGrid{};
@@ -90,6 +127,9 @@ class Bridge {
             physics->step(effective);
         auto const state = physics->state();
         builtin_interfaces::msg::Time const stamp = rclcpp::Time{static_cast<std::int64_t>(state.time * 1e9)};
+        history.emplace_back(rclcpp::Time{stamp}.nanoseconds(), state);
+        if (history.size() > 2000)
+            history.pop_front(); // 20 simulated seconds, never unbounded.
         auto time = rosgraph_msgs::msg::Clock{};
         time.clock = stamp;
         clock->publish(time);
@@ -138,6 +178,8 @@ class Bridge {
     rclcpp::Node &node;
     std::unique_ptr<simulation::Physics> physics;
     std::ofstream telemetry;
+    std::ofstream localization;
+    std::deque<std::pair<std::int64_t, simulation::State>> history;
     std::unique_ptr<simulation::Viewer> viewer;
     bool viewerClosed = false;
     simulation::Velocity command;
@@ -149,6 +191,7 @@ class Bridge {
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map;
     rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf, staticTf;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr estimate;
     rclcpp::TimerBase::SharedPtr timer;
 };
 } // namespace
@@ -165,16 +208,33 @@ int main(int argc, char **argv) {
         auto const model = node->declare_parameter<std::string>("model");
         auto physics = simulation::makePhysics(model);
         auto viewer = std::unique_ptr<simulation::Viewer>{};
-        if (node->declare_parameter<bool>("viewer", false))
+        auto const view = node->declare_parameter<bool>("viewer", false);
+        auto const mode = node->declare_parameter<std::string>("executor", "single");
+        if (view and mode != "single")
+            throw std::invalid_argument{"viewer requires the main-thread single executor"};
+        if (view)
             viewer =
                 simulation::makeViewer({model, node->declare_parameter<std::string>("viewer_capture", ""),
                                         node->declare_parameter<double>("viewer_target_x", 4.0),
                                         node->declare_parameter<double>("viewer_target_y", 0.0)});
         auto bridge = Bridge{*node, std::move(physics), std::move(viewer)};
-        auto executor = rclcpp::executors::SingleThreadedExecutor{};
-        executor.add_node(node);
-        auto scope = lexec::counting_scope{};
-        lrclexec::spin_with_scope(executor, scope, stop.get_token());
+        std::unique_ptr<rclcpp::Executor> executor;
+        if (mode == "single")
+            executor = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+        else if (mode == "multi")
+            executor =
+                std::make_unique<rclcpp::executors::MultiThreadedExecutor>(rclcpp::ExecutorOptions{}, 4);
+        else
+            throw std::invalid_argument{"executor must be single or multi"};
+        executor->add_node(node);
+        auto cancel = lexec::inplace_stop_callback{stop.get_token(), [&]() noexcept { executor->cancel(); }};
+        // rclcpp cancel() before spin() is not sticky; cover the narrow startup race.
+        auto shutdownPoll = node->create_wall_timer(10ms, [&] {
+            if (stop.stop_requested())
+                executor->cancel();
+        });
+        if (not stop.stop_requested())
+            executor->spin();
         bridge.stop();
         status = signals.error() ? 1 : 0;
     } catch (std::exception const &error) {

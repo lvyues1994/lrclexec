@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 ROOTS = [
+    "ros-jazzy-nav2-amcl",
     "ros-jazzy-nav2-planner",
     "ros-jazzy-nav2-controller",
     "ros-jazzy-nav2-navfn-planner",

@@ -2,9 +2,9 @@
 
 用真实 Nav2 planner/controller 验证 `examples/nav2/Navigator` 的 sender/receiver 任务组合。程序直接使用 MuJoCo C SDK，默认无界面运行，可启用原生窗口；轮速执行器通过接触与摩擦驱动底盘，位置由物理仿真产生。
 
-`mujoco_bridge` 接收 `/cmd_vel`，发布 `/clock`、`/odom`、TF、`/scan` 和 `/map`。`mujoco_navigator` 用 Service sender 等待 Nav2 生命周期进入 ACTIVE，然后调用 `ComputePathToPose` / `FollowPath`，每秒仿真时间重规划一次。启动查询与超时使用墙钟，导航重规划使用节点 ROS 时钟；客户端统计 FollowPath feedback，成功回归要求收到进度。结束或取消后，任务排空，再关闭 Nav2，最后关闭仿真。
+`mujoco_bridge` 接收 `/cmd_vel`，发布 `/clock`、`/odom`、TF、`/scan` 和 `/map`。`mujoco_navigator` 用 Service sender 先等 AMCL ACTIVE、设置初始位姿并等待定位/TF 就绪，再等 planner/controller ACTIVE，然后调用 `ComputePathToPose` / `FollowPath`，每秒仿真时间重规划一次。启动查询与超时使用墙钟，导航重规划使用节点 ROS 时钟；客户端统计 FollowPath feedback，成功回归要求收到进度。结束或取消后，任务排空，再关闭 Nav2，最后关闭仿真。
 
-第一版使用真值里程计和固定的 `map → odom`，尚未引入 AMCL 或 SLAM。地图由同一 MJCF 场景中的静态、轴对齐盒子生成。模型约定两轮半径一致、轮轴沿 Y、执行器 gear=1；当前 `scene.xml` 满足这些约定。
+默认使用 AMCL 提供 `map → odom`，`--localization truth` 可保留固定变换兼容模式。当前 `/odom` 与 `odom → base_link` 仍来自物理真值，尚未引入轮编码器里程计或 SLAM。地图由同一 MJCF 场景中的静态、轴对齐盒子生成。模型约定两轮半径一致、轮轴沿 Y、执行器 gear=1；当前 `scene.xml` 满足这些约定。
 
 ## 构建
 
@@ -64,7 +64,7 @@ UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
 UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
   simulation/mujoco/run.py --build build/debug \
   --nav2-prefix build/nav2/root/opt/ros/jazzy \
-  --logs build/mujoco-runs --case all
+  --logs build/mujoco-runs/multi --executor multi --case all
 ```
 
 | 场景 | 检查 |
@@ -76,6 +76,16 @@ UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
 
 三个运动场景均检查全程无墙体/障碍物碰撞。成功场景还检查物理位置误差小于 0.15 m、航向误差小于 0.18 rad；绕障场景要求侧向位移超过 0.55 m。独立的 `mujoco_physics` 测试检查轮子前进、转向、零速度制动、激光距离和倾斜射线。
 
-每个场景保存节点日志、`physics.jsonl`、`result.json` 和 `exit.json`。只有 Action、物理状态与进程关闭检查全部通过才写入 `status: passed`；强制终止进程会使测试失败。脚本只管理自己创建的进程组，清理阶段忽略重复中断，保留时钟直到客户端排空和 Nav2 退出。底盘另有 300 ms 指令看门狗。
+每个场景保存节点日志、`physics.jsonl`、`result.json` 和 `exit.json`；AMCL 模式另存 `localization.jsonl`。只有 Action、物理状态与进程关闭检查全部通过才写入 `status: passed`；强制终止进程会使测试失败。脚本只管理自己创建的进程组，清理阶段忽略重复中断，保留时钟直到客户端排空和 Nav2 退出。底盘另有 300 ms 指令看门狗。
 
 默认 DDS 域为 220；`all` 对后续场景递增域号。可用 `--domain` 改为其他空闲域；同一输出目录避免同时运行多个回归。
+
+## AMCL 与执行器验收
+
+`--executor single|multi` 选择桥和客户端的实际 executor，默认 single。Multi 使用四线程 `spin()`；桥的物理状态仍由同一个互斥 callback group 保护。Nav2/AMCL 独立进程继续使用各自原有 executor。`--view --executor multi` 时，客户端仍为 Multi，桥固定为 Single，保证 GLFW 渲染留在主线程。
+
+客户端通过 `/set_initial_pose` 注入 `(0.15, -0.10, 0.08 rad)` 的小幅偏差，位置协方差各为 `0.09 m²`，航向协方差为 `0.04 rad²`。随后调用 `/request_nomotion_update` 支持静止初始化；收到至少 10 个新鲜 AMCL 样本、位置协方差之和低于 `0.02 m²`、航向协方差低于 `0.02 rad²`，且 `map → base_link` TF 可用后才开始导航。初始化最多等待 20 秒。
+
+定位误差评分不参与控制或就绪判断。桥保留最近 20 秒物理历史，按 AMCL 消息的激光时间戳精确匹配，记录估计、真值、误差与协方差。三个运动场景要求就绪后的每个定位样本误差不超过 `0.10 m / 0.10 rad`，同时保留原有物理目标、无碰撞、反馈和排空门槛。结果同时记录初始化全过程最大误差及最后一次定位误差；最后一次定位样本不一定与停稳时间相同。
+
+CTest 持久覆盖 AMCL 四场景 × Single/Multi，以及真值模式直线兼容检查。启动取消不要求 AMCL 样本。当前验收仍基于给定静态地图、无噪声激光和真值里程计，不能替代带里程计误差的定位验证。

@@ -38,13 +38,16 @@ find_package(tf2_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(tf2_ros REQUIRED)
 add_executable(mujoco_bridge bridge.cpp)
 target_link_libraries(mujoco_bridge PRIVATE mujoco_physics mujoco_viewer lrclexec::lrclexec
     rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp tf2_msgs::tf2_msgs__rosidl_typesupport_cpp
     sensor_msgs::sensor_msgs__rosidl_typesupport_cpp nav_msgs::nav_msgs__rosidl_typesupport_cpp)
 add_executable(mujoco_navigator navigate.cpp)
 target_link_libraries(mujoco_navigator PRIVATE lrclexec_nav2_example
-    lifecycle_msgs::lifecycle_msgs__rosidl_typesupport_cpp)
+    lifecycle_msgs::lifecycle_msgs__rosidl_typesupport_cpp
+    std_srvs::std_srvs__rosidl_typesupport_cpp tf2_ros::tf2_ros)
 if(LRCLEXEC_BUILD_TESTS)
     add_executable(mujoco_physics_test physics_test.cpp)
     target_link_libraries(mujoco_physics_test PRIVATE mujoco_physics)
@@ -58,18 +61,29 @@ if(LRCLEXEC_BUILD_TESTS)
     set(LRCLEXEC_NAV2_RUNTIME_PREFIX "" CACHE PATH "Jazzy prefix with the Nav2 runtime nodes")
     if(LRCLEXEC_NAV2_RUNTIME_PREFIX)
         find_program(UV_EXECUTABLE uv REQUIRED)
-        foreach(case IN ITEMS straight obstacle cancel startup-cancel)
-            add_test(NAME mujoco_nav2_${case} COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
-                ${CMAKE_CURRENT_SOURCE_DIR}/run.py --build ${PROJECT_BINARY_DIR}
-                --nav2-prefix ${LRCLEXEC_NAV2_RUNTIME_PREFIX}
-                --logs ${PROJECT_BINARY_DIR}/mujoco-runs --case ${case})
-            # The harness bounds readiness, motion, completion, stop and each child shutdown.
-            set_tests_properties(mujoco_nav2_${case} PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
-                ENVIRONMENT "UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
-            if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
-                set_tests_properties(mujoco_nav2_${case} PROPERTIES
-                    TIMEOUT_SIGNAL_NAME SIGINT TIMEOUT_SIGNAL_GRACE_PERIOD 60)
-            endif()
+        foreach(mode IN ITEMS single multi)
+            foreach(case IN ITEMS straight obstacle cancel startup-cancel)
+                add_test(NAME mujoco_nav2_${mode}_${case} COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
+                    ${CMAKE_CURRENT_SOURCE_DIR}/run.py --build ${PROJECT_BINARY_DIR}
+                    --nav2-prefix ${LRCLEXEC_NAV2_RUNTIME_PREFIX}
+                    --logs ${PROJECT_BINARY_DIR}/mujoco-runs/${mode}/amcl --executor ${mode} --case ${case})
+                set_tests_properties(mujoco_nav2_${mode}_${case} PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
+                    ENVIRONMENT "UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+                if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
+                    set_tests_properties(mujoco_nav2_${mode}_${case} PROPERTIES
+                        TIMEOUT_SIGNAL_NAME SIGINT TIMEOUT_SIGNAL_GRACE_PERIOD 60)
+                endif()
+            endforeach()
         endforeach()
+        add_test(NAME mujoco_nav2_truth COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
+            ${CMAKE_CURRENT_SOURCE_DIR}/run.py --build ${PROJECT_BINARY_DIR}
+            --nav2-prefix ${LRCLEXEC_NAV2_RUNTIME_PREFIX}
+            --logs ${PROJECT_BINARY_DIR}/mujoco-runs/truth --localization truth --case straight)
+        set_tests_properties(mujoco_nav2_truth PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
+            ENVIRONMENT "UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
+            set_tests_properties(mujoco_nav2_truth PROPERTIES
+                TIMEOUT_SIGNAL_NAME SIGINT TIMEOUT_SIGNAL_GRACE_PERIOD 60)
+        endif()
     endif()
 endif()

@@ -10,15 +10,19 @@ import time
 from pathlib import Path
 
 
-def records(path):
+def records(path, *, strict=False):
     if not path.exists():
         return []
     rows = []
-    for line in path.read_text().splitlines():
+    contents = path.read_text()
+    lines = contents.splitlines()
+    for index, line in enumerate(lines):
         try:
             rows.append(json.loads(line))
         except json.JSONDecodeError:
-            pass  # The writer may be in the middle of its final line.
+            if strict and (index + 1 < len(lines) or contents.endswith("\n")):
+                raise
+            # The writer may be in the middle of its final line.
     return rows
 
 
@@ -85,7 +89,7 @@ class Processes:
             for number in (signal.SIGINT, signal.SIGTERM)
         }
         try:
-            for name in ("navigator", "manager", "controller", "planner", "bridge"):
+            for name in ("navigator", "manager", "controller", "planner", "amcl", "bridge"):
                 try:
                     self.stop(name)
                 except Exception as error:  # noqa: BLE001 - Reap every remaining child.
@@ -132,7 +136,7 @@ def run_case(args, case, domain):
     # Old telemetry must not satisfy this run's readiness or motion predicates.
     telemetry = directory / "physics.jsonl"
     telemetry.unlink(missing_ok=True)
-    for name in ("result.json", "exit.json", "viewer.ppm", "viewer.ppm.tmp"):
+    for name in ("result.json", "exit.json", "viewer.ppm", "viewer.ppm.tmp", "localization.jsonl"):
         (directory / name).unlink(missing_ok=True)
     prefix = args.nav2_prefix.resolve()
     environment = os.environ.copy()
@@ -174,6 +178,9 @@ def run_case(args, case, domain):
             f"viewer:={'true' if args.view else 'false'}",
             "-p",
             f"viewer_target_x:={target}",
+            "-p", f"localization:={args.localization}",
+            "-p", f"localization_log:={directory / 'localization.jsonl'}",
+            "-p", f"executor:={'single' if args.view else args.executor}",
         ]
         if args.view:
             bridge_args.extend(["-p", f"viewer_capture:={directory / 'viewer.ppm'}"])
@@ -185,12 +192,15 @@ def run_case(args, case, domain):
             processes,
         )
         for name, package, executable in (
+            ("amcl", "nav2_amcl", "amcl"),
             ("planner", "nav2_planner", "planner_server"),
             ("controller", "nav2_controller", "controller_server"),
             ("manager", "nav2_lifecycle_manager", "lifecycle_manager"),
         ):
             if case == "startup-cancel":
                 break
+            if name == "amcl" and args.localization == "truth":
+                continue
             command = [
                 str(prefix / "lib" / package / executable),
                 "--ros-args",
@@ -199,6 +209,8 @@ def run_case(args, case, domain):
             ]
             if name == "manager":
                 command.extend(["-r", "__node:=lifecycle_manager_navigation"])
+                if args.localization == "truth":
+                    command.extend(["-p", "node_names:=[planner_server, controller_server]"])
             processes.start(name, command)
         navigator = processes.start(
             "navigator",
@@ -207,6 +219,8 @@ def run_case(args, case, domain):
                 "--ros-args",
                 "-p",
                 f"target_x:={target}",
+                "-p", f"executor:={args.executor}",
+                "-p", f"localization:={args.localization}",
             ],
         )
         if case == "startup-cancel":
@@ -309,11 +323,42 @@ def run_case(args, case, domain):
             raise RuntimeError("robot did not physically go around scan-only obstacle")
         outcome = {
             "case": case,
+            "executor": args.executor,
+            "bridge_executor": "single" if args.view else args.executor,
+            "localization": args.localization,
             "terminal": terminal,
             "feedback": feedback,
             "final": last,
             "max_lateral_offset": max(abs(row["y"]) for row in rows),
         }
+        if args.localization == "amcl" and case != "startup-cancel" and not user_closed:
+            estimates = records(directory / "localization.jsonl", strict=True)
+            if not estimates or any(not row["matched"] for row in estimates):
+                raise RuntimeError("AMCL estimates were missing or could not match scan-time truth")
+            marker = "LOCALIZATION_READY time="
+            if marker not in output or output.index(marker) > output.index("GOAL_STARTED"):
+                raise RuntimeError("navigation started before AMCL localization was ready")
+            ready_at = float(output.split(marker, 1)[1].splitlines()[0])
+            localized = [row for row in estimates if row["time"] >= ready_at]
+            if not localized:
+                raise RuntimeError("no AMCL estimate after localization readiness")
+            for row in estimates:
+                if not all(math.isfinite(value) for value in row.values()):
+                    raise RuntimeError("AMCL estimate contained a nonfinite value")
+            if any(row["xy_error"] > 0.10 or row["yaw_error"] > 0.10 for row in localized):
+                raise RuntimeError("AMCL exceeded 0.10 m / 0.10 rad after readiness")
+            outcome["localization_metrics"] = {
+                "samples": len(estimates),
+                "ready_at": ready_at,
+                "initial_offset_m": math.hypot(0.15, 0.10),
+                "initial_offset_rad": 0.08,
+                "all_max_xy_error": max(row["xy_error"] for row in estimates),
+                "all_max_yaw_error": max(row["yaw_error"] for row in estimates),
+                "ready_max_xy_error": max(row["xy_error"] for row in localized),
+                "ready_max_yaw_error": max(row["yaw_error"] for row in localized),
+                "final_xy_error": estimates[-1]["xy_error"],
+                "final_yaw_error": estimates[-1]["yaw_error"],
+            }
         if args.view and not user_closed:
             print(
                 f"{terminal}: robot stopped. Close the MuJoCo window to exit.",
@@ -360,6 +405,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--build", type=Path, required=True)
 parser.add_argument("--nav2-prefix", type=Path, required=True)
 parser.add_argument("--logs", type=Path, required=True)
+parser.add_argument("--executor", choices=["single", "multi"], default="single")
+parser.add_argument("--localization", choices=["amcl", "truth"], default="amcl")
 parser.add_argument(
     "--view", action="store_true", help="show MuJoCo and keep the window open"
 )

@@ -37,3 +37,20 @@ warmup 与 measure 分别记账。测试要求每次接纳恰好完成一次、e
 所有 producer 共用一个 scheduler 和互斥 callback group。Multi 使用四个 executor 线程，不能据此声称同一 scheduler 的任务并行。数据包含仪器、分配器和 SDK 开销；CPU governor、后台负载、RMW、构建类型都会影响结果。RSS 平台或一次长压通过不能证明没有泄漏，业务窗口也不等于 SDK 内部队列深度；默认 EventsQueue 不保证内存有界。Jazzy 28.1.22 的 Events 长压已有 Topic 超时，详见[本机记录](RESULTS.md)，尚不能作为稳定性通过项。
 
 启用 `LRCLEXEC_BUILD_BENCHMARKS=ON` 和测试后，CTest 还验证三个 executor 的短期测量协议及直方图与排序分位数的一致性，不设机器相关的性能门槛。
+
+## Action 专项长压
+
+`lrclexec_action_load` 使用真实 `execute_action` 和抢占式 ActionServer。每条任务链循环提交九个目标，覆盖成功、客户端取消、A→B→C 抢占（B 的工厂不运行）、feedback 后取消、goal 拒绝、携带结果的 abort，以及取消被拒后等待成功终态。启动阶段先确认协议服务端缺席，再创建并发现它；不向缺席服务端提交无法保证排空的 Action。
+
+```bash
+UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
+  benchmarks/run.py --binary build/release-bench/benchmarks/lrclexec_action_load \
+  --stage action --seconds 600 --executors single multi \
+  --output build/measurements/action
+```
+
+runner 使用四条独立任务链，每条有自己的节点、scheduler 和互斥 callback group；Multi 实际运行四线程 `spin()`。程序也可直接指定 `--lanes 1` 做最小实验。每条链固定最多三个未完成目标，检查业务资源峰值为一、交接无重叠、最终释放。预期 rejected/aborted 单独统计，不算测试错误；每轮应有 3 value、2 stopped、1 rejected、3 aborted。feedback 载荷及取消 `ERROR_REJECTED` 均检查，observer 在终态后不能继续调用。
+
+每个协议阶段等待最多 5 秒；失败立即输出阶段并异常退出，保留在途对象直到进程结束。正常结束关闭并 join 客户端/服务端 scope，再停止并 join executor，最后释放原生 Action owners。`join_seconds` 测量完整循环结束后的空闲关闭；P99/max 包含本地 DDS、测量及人为控制的清理门，不代表单次队列投递延迟。runner 限制总时长并保存超时部分输出，超时强制回收不属于正常排空。Action stage 不单独预热，数据包含从启动后的第一轮开始的全过程。
+
+RSS 包含原生 SDK 的结果缓存；Jazzy 默认结果缓存期限为 10 秒。业务资源归零、RSS 平台和一次长压通过均不能证明 SDK 无泄漏。CTest 的 `action_load_single_smoke` / `action_load_multi_smoke` 验证所有场景及计数，不设吞吐门槛。Events 的动态订阅故障复现另见 [SDK 诊断](EVENTS.md)。

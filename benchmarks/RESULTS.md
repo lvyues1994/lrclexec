@@ -49,3 +49,22 @@
 ## 正确性检查
 
 Debug 与 Clang 18.1.3 ASan/UBSan 各通过 28/28 项全量回归，包含 Nav2/MuJoCo 无界面测试。最后补充 timer 挂载屏障异常收束后，三个测量 smoke 在两种构建下再次通过；临时 ASan/UBSan 探针确认异常传播前完成取消排空。Cyclone DDS 的新增六项回归也通过。runner 的非零退出、timeout/部分输出留档、半行 JSON 失败汇总和 CTest stderr 展示已分别验证。GitHub Actions 配置已更新，本轮未在远端运行。
+
+## 2026-10-03：Action、AMCL 与 Events 定位补充
+
+本轮 Action Release 二进制 SHA-256 为 `c12337e08d3edd3c984294b2d35b9eb96d81b2884a4896c7a15751924d3d104b`，两组记录的二进制、`action_load.cpp` 和 `Metrics.h` hash 已与最终文件核对。Single/Multi 各使用四条独立任务链、不同 DDS 域并发执行 600 秒；期间也进行了构建和回归，吞吐不用于横向性能结论。
+
+| Executor | 时长（秒） | 完成目标 | value / stopped / rejected / aborted | RSS 起→末 / 峰值（KiB） |
+| --- | ---: | ---: | --- | ---: |
+| Single | 600.067 | 756,153 | 252,051 / 168,034 / 84,017 / 252,051 | 40,220→49,504 / 49,576 |
+| Multi | 600.065 | 768,645 | 256,215 / 170,810 / 85,405 / 256,215 | 40,608→53,300 / 53,588 |
+
+两组均无重复完成，最终 inflight 为 0、客户端峰值为 12，每条链业务资源峰值为 1、scope join 后为 0，没有资源交接重叠。feedback 分别为 169,071 / 171,147 次，stderr 均为空。P99 桶上界分别为 6.554 / 5.243 ms，最大端到端延迟为 23.163 / 14.927 ms，包含 DDS 和人为清理门。空闲关闭并 join 的耗时分别为 0.361 / 0.057 ms，不能当作活动目标取消耗时。
+
+第 300 秒以后的 RSS 范围为 49,504–49,528 KiB / 52,988–53,588 KiB；没有把平台形态解释为无泄漏证明。原始环境、采样、分类计数和汇总保存在 `build/measurements/action-soak-single/`、`build/measurements/action-soak-multi/`。
+
+Debug、Clang ASan/UBSan 全量回归各通过 35/35，新增的两个 Action smoke 在本地 Cyclone DDS 0.10.5 / rmw_cyclonedds_cpp 2.2.4 overlay 下也通过。首次 Cyclone 启动失败属于缺少 overlay 动态库路径，补齐环境后重跑通过；没有修改系统安装。严格定位日志解析另外验证了完整坏行会失败、末尾写入中的半行可忽略，并重新读取了全部 AMCL 评分日志。
+
+两种构建各覆盖 AMCL 四场景 × Single/Multi 和真值模式兼容检查，所有子进程正常退出。定位就绪后，Debug 的最大位置/航向误差为 0.07453 m / 0.00773 rad，ASan/UBSan 为 0.07988 m / 0.00873 rad；均满足预先设置的 0.10 m / 0.10 rad 门槛，且保留物理目标、绕障、无碰撞和取消停稳检查。日志位于 `build/{debug,asan-clang}/mujoco-runs/`。这仍是真值里程计、无噪声激光和给定地图条件下的验收。
+
+Events 原生订阅实验连续 5 次复现同地址替换后通知丢失，Single/Multi 对照正常；收入仓库后的手动目标也得到 Single/Multi 退出 0、Events 退出 2。故障证据与退出码见 [SDK 诊断](EVENTS.md)。本轮没有修改 SDK，也没有把故障复现算作通过测试；历史混合长压 timeout 与本缺陷是否同因仍缺当时的直接证据。
