@@ -1,3 +1,4 @@
+#include "GoalInbox.h"
 #include "Navigator.h"
 #include <atomic>
 #include <chrono>
@@ -12,7 +13,9 @@
 #include <nav2_msgs/srv/set_initial_pose.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/create_client.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <thread>
@@ -116,6 +119,7 @@ int main(int argc, char **argv) {
         auto node = std::make_shared<rclcpp::Node>("lexec_mujoco_navigator", nodeOptions);
         auto const mode = node->declare_parameter<std::string>("executor", "single");
         auto const localizationMode = node->declare_parameter<std::string>("localization", "amcl");
+        auto const interactive = node->declare_parameter<bool>("interactive", false);
         if (localizationMode != "amcl" and localizationMode != "truth")
             throw std::invalid_argument{"localization must be amcl or truth"};
         std::unique_ptr<rclcpp::Executor> executor;
@@ -154,6 +158,36 @@ int main(int argc, char **argv) {
         auto const initialX = node->declare_parameter<double>("initial_x", .15);
         auto const initialY = node->declare_parameter<double>("initial_y", -.10);
         auto const initialYaw = node->declare_parameter<double>("initial_yaw", .08);
+        auto inbox = simulation::GoalInbox{};
+        auto closeInbox = lexec::inplace_stop_callback{stop.get_token(), [&]() noexcept { inbox.close(); }};
+        auto sessionStatus = node->create_publisher<std_msgs::msg::String>("navigation/status",
+                                                                           rclcpp::QoS{1}.transient_local());
+        auto activeGoal = node->create_publisher<geometry_msgs::msg::PoseStamped>(
+            "navigation/active_goal", rclcpp::QoS{1}.transient_local());
+        rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goals;
+        rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel;
+        rclcpp::TimerBase::SharedPtr statusTimer;
+        if (interactive) {
+            goals = node->create_subscription<geometry_msgs::msg::PoseStamped>(
+                "goal_pose", rclcpp::QoS{1}, [&](geometry_msgs::msg::PoseStamped message) {
+                    message.header.stamp = node->now();
+                    if (not inbox.submit(std::move(message)))
+                        RCLCPP_WARN(node->get_logger(),
+                                    "Goal rejected: session not ready or invalid map pose");
+                });
+            cancel = node->create_service<std_srvs::srv::Trigger>(
+                "navigation/cancel", [&](std_srvs::srv::Trigger::Request::SharedPtr,
+                                         std_srvs::srv::Trigger::Response::SharedPtr response) {
+                    response->success = inbox.cancel();
+                    response->message = response->success ? "Cancellation requested; waiting for drain"
+                                                          : "No active or queued target";
+                });
+            statusTimer = node->create_wall_timer(100ms, [&] {
+                auto message = std_msgs::msg::String{};
+                message.data = simulation::statusJson(inbox.status());
+                sessionStatus->publish(message);
+            });
+        }
         auto spinner = Spinning{*executor};
         std::cout << "WAITING_FOR_NAV2 executor=" << mode << " localization=" << localizationMode << '\n'
                   << std::flush;
@@ -206,6 +240,41 @@ int main(int argc, char **argv) {
         auto progressCount = 0;
         resources.pathReady = [&](auto const &) { ++planCount; };
         resources.progress = [&](auto const &) { ++progressCount; };
+        if (interactive) {
+            inbox.ready();
+            std::cout << "SESSION_READY\n" << std::flush;
+            while (auto goal = inbox.next()) {
+                auto outcome = simulation::GoalOutcome::failed;
+                auto message = std::string{};
+                try {
+                    activeGoal->publish(goal->pose);
+                    // This main thread is the sole consumer. sync_wait destroys
+                    // its operation before complete() allows the next target.
+                    auto result = lexec::sync_wait(
+                        lexec::write_env(lexec::coro::as_sender(navigation::navigate(resources, goal->pose)),
+                                         lexec::prop{lexec::get_stop_token, goal->stop->get_token()}));
+                    outcome = result ? simulation::GoalOutcome::succeeded : simulation::GoalOutcome::canceled;
+                } catch (navigation::NavigationError const &error) {
+                    message = error.failure.phase == navigation::Phase::planning ? "Planning failed"
+                                                                                 : "Following failed";
+                    if (error.failure.code)
+                        message += " (code " + std::to_string(*error.failure.code) + ")";
+                    if (not error.failure.message.empty())
+                        message += ": " + error.failure.message;
+                    std::cerr << "navigation failed: " << message << '\n';
+                } catch (std::exception const &error) {
+                    message = error.what();
+                    std::cerr << "navigation failed: " << message << '\n';
+                }
+                inbox.complete(goal->id, outcome, std::move(message));
+            }
+            spinner.stop();
+            std::cout << "SESSION_DRAINED " << simulation::statusJson(inbox.status()) << '\n'
+                      << "DRAINED plans=" << planCount << " feedback=" << progressCount << '\n'
+                      << std::flush;
+            rclcpp::shutdown();
+            return signals.error() ? 1 : 0;
+        }
         target.header.stamp = node->now();
         auto scope = lexec::counting_scope{};
         auto work = lexec::coro::as_sender(navigation::navigate(resources, target)) |

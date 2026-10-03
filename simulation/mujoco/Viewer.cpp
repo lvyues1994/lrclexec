@@ -102,6 +102,11 @@ struct ViewerImpl final : Viewer {
             self.drag(x, y);
         });
     }
+    void setGoal(double x, double y) override {
+        config.targetX = x;
+        config.targetY = y;
+        config.hasTarget = true;
+    }
     void drag(double x, double y) {
         auto const dx = x - cursorX, dy = y - cursorY;
         cursorX = x;
@@ -136,8 +141,12 @@ struct ViewerImpl final : Viewer {
         mjr_render(viewport, &scene.value, &context.value);
         auto text = std::ostringstream{};
         text << "Nav2 + MuJoCo\nTime: " << state.time << " s\nRobot: (" << state.positions[0] << ", "
-             << state.positions[1] << ")\nGoal: (" << config.targetX << ", " << config.targetY
-             << ")\nDrag: rotate | Right drag: pan | Wheel: zoom\nEsc / Close: stop";
+             << state.positions[1] << ")";
+        if (config.hasTarget)
+            text << "\nLast target: (" << config.targetX << ", " << config.targetY << ")";
+        else
+            text << "\nWaiting for a target in RViz";
+        text << "\nDrag: rotate | Right drag: pan | Wheel: zoom\nEsc / Close: stop";
         mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, text.str().c_str(), nullptr, &context.value);
         if (not config.captureFile.empty() and state.time - capturedAt >= 1) {
             capture(viewport);
@@ -147,7 +156,7 @@ struct ViewerImpl final : Viewer {
         return true;
     }
     void addGoal() {
-        if (scene.value.ngeom == scene.value.maxgeom)
+        if (not config.hasTarget or scene.value.ngeom == scene.value.maxgeom)
             return;
         auto const size = std::array<mjtNum, 3>{.09, .09, .09};
         auto const position = std::array<mjtNum, 3>{config.targetX, config.targetY, .09};

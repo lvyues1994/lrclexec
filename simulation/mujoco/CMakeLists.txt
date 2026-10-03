@@ -36,19 +36,30 @@ endif()
 find_package(rosgraph_msgs REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 add_executable(mujoco_bridge bridge.cpp)
 target_link_libraries(mujoco_bridge PRIVATE mujoco_physics mujoco_viewer lrclexec::lrclexec
     rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp tf2_msgs::tf2_msgs__rosidl_typesupport_cpp
     sensor_msgs::sensor_msgs__rosidl_typesupport_cpp nav_msgs::nav_msgs__rosidl_typesupport_cpp)
+add_library(mujoco_goal_inbox OBJECT GoalInbox.cpp)
+target_link_libraries(mujoco_goal_inbox PUBLIC lrclexec::lrclexec
+    geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
+target_include_directories(mujoco_goal_inbox PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(mujoco_navigator navigate.cpp)
 target_link_libraries(mujoco_navigator PRIVATE lrclexec_nav2_example
+    mujoco_goal_inbox std_msgs::std_msgs__rosidl_typesupport_cpp
     lifecycle_msgs::lifecycle_msgs__rosidl_typesupport_cpp
     std_srvs::std_srvs__rosidl_typesupport_cpp tf2_ros::tf2_ros)
 if(LRCLEXEC_BUILD_TESTS)
+    add_executable(mujoco_goal_inbox_test goal_inbox_test.cpp)
+    target_link_libraries(mujoco_goal_inbox_test PRIVATE mujoco_goal_inbox)
+    add_test(NAME mujoco_goal_inbox COMMAND mujoco_goal_inbox_test)
+    set_tests_properties(mujoco_goal_inbox PROPERTIES TIMEOUT 10)
     add_executable(mujoco_physics_test physics_test.cpp)
     target_link_libraries(mujoco_physics_test PRIVATE mujoco_physics)
     file(READ ${CMAKE_CURRENT_SOURCE_DIR}/scene.xml tilted_scene)
@@ -62,7 +73,7 @@ if(LRCLEXEC_BUILD_TESTS)
     if(LRCLEXEC_NAV2_RUNTIME_PREFIX)
         find_program(UV_EXECUTABLE uv REQUIRED)
         foreach(mode IN ITEMS single multi)
-            foreach(case IN ITEMS straight obstacle cancel startup-cancel)
+            foreach(case IN ITEMS straight obstacle cancel startup-cancel session)
                 add_test(NAME mujoco_nav2_${mode}_${case} COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
                     ${CMAKE_CURRENT_SOURCE_DIR}/run.py --build ${PROJECT_BINARY_DIR}
                     --nav2-prefix ${LRCLEXEC_NAV2_RUNTIME_PREFIX}

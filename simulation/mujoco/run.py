@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -38,6 +39,25 @@ def last_record(path):
         except json.JSONDecodeError:
             continue
     return {}
+
+
+class RecordsCursor:
+    """Read appended complete rows without retaining a growing session history."""
+
+    def __init__(self, path):
+        self.path = path
+        self.offset = 0
+
+    def take(self):
+        rows = []
+        with self.path.open() as stream:
+            stream.seek(self.offset)
+            while line := stream.readline():
+                if not line.endswith("\n"):
+                    break
+                rows.append(json.loads(line))
+                self.offset = stream.tell()
+        return rows
 
 
 class Processes:
@@ -89,7 +109,17 @@ class Processes:
             for number in (signal.SIGINT, signal.SIGTERM)
         }
         try:
-            for name in ("navigator", "manager", "controller", "planner", "amcl", "bridge"):
+            for name in (
+                "navigator",
+                "controls",
+                "rviz",
+                "check",
+                "manager",
+                "controller",
+                "planner",
+                "amcl",
+                "bridge",
+            ):
                 try:
                     self.stop(name)
                 except Exception as error:  # noqa: BLE001 - Reap every remaining child.
@@ -136,7 +166,13 @@ def run_case(args, case, domain):
     # Old telemetry must not satisfy this run's readiness or motion predicates.
     telemetry = directory / "physics.jsonl"
     telemetry.unlink(missing_ok=True)
-    for name in ("result.json", "exit.json", "viewer.ppm", "viewer.ppm.tmp", "localization.jsonl"):
+    for name in (
+        "result.json",
+        "exit.json",
+        "viewer.ppm",
+        "viewer.ppm.tmp",
+        "localization.jsonl",
+    ):
         (directory / name).unlink(missing_ok=True)
     prefix = args.nav2_prefix.resolve()
     environment = os.environ.copy()
@@ -160,6 +196,7 @@ def run_case(args, case, domain):
     failure = None
     user_closed = False
     target = 1.0 if case == "straight" else 4.0
+    session = case in ("session", "interactive")
 
     def window_closed():
         return args.view and bool(last_record(telemetry).get("viewer_closed", False))
@@ -178,9 +215,14 @@ def run_case(args, case, domain):
             f"viewer:={'true' if args.view else 'false'}",
             "-p",
             f"viewer_target_x:={target}",
-            "-p", f"localization:={args.localization}",
-            "-p", f"localization_log:={directory / 'localization.jsonl'}",
-            "-p", f"executor:={'single' if args.view else args.executor}",
+            "-p",
+            f"localization:={args.localization}",
+            "-p",
+            f"localization_log:={directory / 'localization.jsonl'}",
+            "-p",
+            f"executor:={'single' if args.view else args.executor}",
+            "-p",
+            f"viewer_has_target:={'false' if session else 'true'}",
         ]
         if args.view:
             bridge_args.extend(["-p", f"viewer_capture:={directory / 'viewer.ppm'}"])
@@ -210,7 +252,9 @@ def run_case(args, case, domain):
             if name == "manager":
                 command.extend(["-r", "__node:=lifecycle_manager_navigation"])
                 if args.localization == "truth":
-                    command.extend(["-p", "node_names:=[planner_server, controller_server]"])
+                    command.extend(
+                        ["-p", "node_names:=[planner_server, controller_server]"]
+                    )
             processes.start(name, command)
         navigator = processes.start(
             "navigator",
@@ -219,160 +263,194 @@ def run_case(args, case, domain):
                 "--ros-args",
                 "-p",
                 f"target_x:={target}",
-                "-p", f"executor:={args.executor}",
-                "-p", f"localization:={args.localization}",
+                "-p",
+                f"executor:={args.executor}",
+                "-p",
+                f"localization:={args.localization}",
+                "-p",
+                f"interactive:={'true' if session else 'false'}",
             ],
         )
-        if case == "startup-cancel":
-            wait_until(
-                lambda: "WAITING_FOR_NAV2" in (directory / "navigator.log").read_text(),
-                5,
-                "lifecycle wait before cancellation",
-                processes,
-            )
-            os.killpg(navigator.pid, signal.SIGINT)
-        elif case == "cancel":
-            wait_until(
-                lambda: (
-                    window_closed()
-                    or any(
-                        row["x"] > 0.2 and abs(row["v"]) > 0.05
-                        for row in records(telemetry)
-                    )
-                ),
-                30,
-                "actual robot motion before cancellation",
-                processes,
-            )
-            if not window_closed():
-                os.killpg(navigator.pid, signal.SIGINT)
-
-        def navigation_finished():
-            nonlocal user_closed
-            if any(row["collision"] for row in records(telemetry)):
-                raise RuntimeError("robot collided during navigation")
-            if window_closed():
-                user_closed = True
-                # SignalStop is installed before this flushed readiness marker.
+        if session:
+            outcome = run_session(args, processes, source, telemetry, window_closed)
+        else:
+            if case == "startup-cancel":
                 wait_until(
                     lambda: (
                         "WAITING_FOR_NAV2" in (directory / "navigator.log").read_text()
-                        or navigator.poll() is not None
                     ),
                     5,
-                    "navigator signal readiness before window cancellation",
+                    "lifecycle wait before cancellation",
                     processes,
-                    allow_navigator_exit=True,
                 )
-                processes.stop("navigator")
-            return navigator.poll() is not None
+                os.killpg(navigator.pid, signal.SIGINT)
+            elif case == "cancel":
+                wait_until(
+                    lambda: (
+                        window_closed()
+                        or any(
+                            row["x"] > 0.2 and abs(row["v"]) > 0.05
+                            for row in records(telemetry)
+                        )
+                    ),
+                    30,
+                    "actual robot motion before cancellation",
+                    processes,
+                )
+                if not window_closed():
+                    os.killpg(navigator.pid, signal.SIGINT)
 
-        wait_until(
-            navigation_finished,
-            70,
-            "navigation completion",
-            processes,
-            allow_navigator_exit=True,
-        )
-        output = (directory / "navigator.log").read_text()
-        canceled = case in ("cancel", "startup-cancel")
-        terminal = "STOPPED" if canceled else "SUCCEEDED"
-        if user_closed:
-            terminal = "SUCCEEDED" if "SUCCEEDED" in output else "STOPPED"
-            canceled = terminal == "STOPPED"
-        if (
-            navigator.returncode != 0
-            or terminal not in output
-            or "DRAINED" not in output
-        ):
-            raise RuntimeError(f"navigation did not drain with {terminal}: {output}")
-        feedback = 0
-        for line in output.splitlines():
-            if line.startswith("DRAINED ") and "feedback=" in line:
-                feedback = int(line.split("feedback=", 1)[1])
-        if not canceled and feedback == 0:
-            raise RuntimeError("successful navigation produced no FollowPath feedback")
-        completed_at = records(telemetry)[-1]["time"]
+            def navigation_finished():
+                nonlocal user_closed
+                if any(row["collision"] for row in records(telemetry)):
+                    raise RuntimeError("robot collided during navigation")
+                if window_closed():
+                    user_closed = True
+                    # SignalStop is installed before this flushed readiness marker.
+                    wait_until(
+                        lambda: (
+                            "WAITING_FOR_NAV2"
+                            in (directory / "navigator.log").read_text()
+                            or navigator.poll() is not None
+                        ),
+                        5,
+                        "navigator signal readiness before window cancellation",
+                        processes,
+                        allow_navigator_exit=True,
+                    )
+                    processes.stop("navigator")
+                return navigator.poll() is not None
 
-        def stopped():
-            rows = [row for row in records(telemetry) if row["time"] > completed_at]
-            return len(rows) >= 3 and all(
-                abs(row["v"]) < 0.03 and abs(row["w"]) < 0.08 for row in rows[-3:]
-            )
-
-        wait_until(
-            stopped,
-            5,
-            "physical stop after Action terminal",
-            processes,
-            allow_navigator_exit=True,
-        )
-        rows = records(telemetry)
-        if any(row["collision"] for row in rows):
-            raise RuntimeError("robot collided with obstacle or wall")
-        last = rows[-1]
-        if not canceled and (
-            math.hypot(last["x"] - target, last["y"]) > 0.15 or abs(last["yaw"]) > 0.18
-        ):
-            raise RuntimeError(f"Action success did not match physical goal: {last}")
-        if (
-            case == "obstacle"
-            and not canceled
-            and max(abs(row["y"]) for row in rows) < 0.55
-        ):
-            raise RuntimeError("robot did not physically go around scan-only obstacle")
-        outcome = {
-            "case": case,
-            "executor": args.executor,
-            "bridge_executor": "single" if args.view else args.executor,
-            "localization": args.localization,
-            "terminal": terminal,
-            "feedback": feedback,
-            "final": last,
-            "max_lateral_offset": max(abs(row["y"]) for row in rows),
-        }
-        if args.localization == "amcl" and case != "startup-cancel" and not user_closed:
-            estimates = records(directory / "localization.jsonl", strict=True)
-            if not estimates or any(not row["matched"] for row in estimates):
-                raise RuntimeError("AMCL estimates were missing or could not match scan-time truth")
-            marker = "LOCALIZATION_READY time="
-            if marker not in output or output.index(marker) > output.index("GOAL_STARTED"):
-                raise RuntimeError("navigation started before AMCL localization was ready")
-            ready_at = float(output.split(marker, 1)[1].splitlines()[0])
-            localized = [row for row in estimates if row["time"] >= ready_at]
-            if not localized:
-                raise RuntimeError("no AMCL estimate after localization readiness")
-            for row in estimates:
-                if not all(math.isfinite(value) for value in row.values()):
-                    raise RuntimeError("AMCL estimate contained a nonfinite value")
-            if any(row["xy_error"] > 0.10 or row["yaw_error"] > 0.10 for row in localized):
-                raise RuntimeError("AMCL exceeded 0.10 m / 0.10 rad after readiness")
-            outcome["localization_metrics"] = {
-                "samples": len(estimates),
-                "ready_at": ready_at,
-                "initial_offset_m": math.hypot(0.15, 0.10),
-                "initial_offset_rad": 0.08,
-                "all_max_xy_error": max(row["xy_error"] for row in estimates),
-                "all_max_yaw_error": max(row["yaw_error"] for row in estimates),
-                "ready_max_xy_error": max(row["xy_error"] for row in localized),
-                "ready_max_yaw_error": max(row["yaw_error"] for row in localized),
-                "final_xy_error": estimates[-1]["xy_error"],
-                "final_yaw_error": estimates[-1]["yaw_error"],
-            }
-        if args.view and not user_closed:
-            print(
-                f"{terminal}: robot stopped. Close the MuJoCo window to exit.",
-                flush=True,
-            )
             wait_until(
-                window_closed,
-                math.inf,
-                "MuJoCo window closure",
+                navigation_finished,
+                70,
+                "navigation completion",
                 processes,
                 allow_navigator_exit=True,
             )
-        if args.view:
-            outcome["closed_by_user"] = True
+            output = (directory / "navigator.log").read_text()
+            canceled = case in ("cancel", "startup-cancel")
+            terminal = "STOPPED" if canceled else "SUCCEEDED"
+            if user_closed:
+                terminal = "SUCCEEDED" if "SUCCEEDED" in output else "STOPPED"
+                canceled = terminal == "STOPPED"
+            if (
+                navigator.returncode != 0
+                or terminal not in output
+                or "DRAINED" not in output
+            ):
+                raise RuntimeError(
+                    f"navigation did not drain with {terminal}: {output}"
+                )
+            feedback = 0
+            for line in output.splitlines():
+                if line.startswith("DRAINED ") and "feedback=" in line:
+                    feedback = int(line.split("feedback=", 1)[1])
+            if not canceled and feedback == 0:
+                raise RuntimeError(
+                    "successful navigation produced no FollowPath feedback"
+                )
+            completed_at = records(telemetry)[-1]["time"]
+
+            def stopped():
+                rows = [row for row in records(telemetry) if row["time"] > completed_at]
+                return len(rows) >= 3 and all(
+                    abs(row["v"]) < 0.03 and abs(row["w"]) < 0.08 for row in rows[-3:]
+                )
+
+            wait_until(
+                stopped,
+                5,
+                "physical stop after Action terminal",
+                processes,
+                allow_navigator_exit=True,
+            )
+            rows = records(telemetry)
+            if any(row["collision"] for row in rows):
+                raise RuntimeError("robot collided with obstacle or wall")
+            last = rows[-1]
+            if not canceled and (
+                math.hypot(last["x"] - target, last["y"]) > 0.15
+                or abs(last["yaw"]) > 0.18
+            ):
+                raise RuntimeError(
+                    f"Action success did not match physical goal: {last}"
+                )
+            if (
+                case == "obstacle"
+                and not canceled
+                and max(abs(row["y"]) for row in rows) < 0.55
+            ):
+                raise RuntimeError(
+                    "robot did not physically go around scan-only obstacle"
+                )
+            outcome = {
+                "case": case,
+                "executor": args.executor,
+                "bridge_executor": "single" if args.view else args.executor,
+                "localization": args.localization,
+                "terminal": terminal,
+                "feedback": feedback,
+                "final": last,
+                "max_lateral_offset": max(abs(row["y"]) for row in rows),
+            }
+            if (
+                args.localization == "amcl"
+                and case != "startup-cancel"
+                and not user_closed
+            ):
+                estimates = records(directory / "localization.jsonl", strict=True)
+                if not estimates or any(not row["matched"] for row in estimates):
+                    raise RuntimeError(
+                        "AMCL estimates were missing or could not match scan-time truth"
+                    )
+                marker = "LOCALIZATION_READY time="
+                if marker not in output or output.index(marker) > output.index(
+                    "GOAL_STARTED"
+                ):
+                    raise RuntimeError(
+                        "navigation started before AMCL localization was ready"
+                    )
+                ready_at = float(output.split(marker, 1)[1].splitlines()[0])
+                localized = [row for row in estimates if row["time"] >= ready_at]
+                if not localized:
+                    raise RuntimeError("no AMCL estimate after localization readiness")
+                for row in estimates:
+                    if not all(math.isfinite(value) for value in row.values()):
+                        raise RuntimeError("AMCL estimate contained a nonfinite value")
+                if any(
+                    row["xy_error"] > 0.10 or row["yaw_error"] > 0.10
+                    for row in localized
+                ):
+                    raise RuntimeError(
+                        "AMCL exceeded 0.10 m / 0.10 rad after readiness"
+                    )
+                outcome["localization_metrics"] = {
+                    "samples": len(estimates),
+                    "ready_at": ready_at,
+                    "initial_offset_m": math.hypot(0.15, 0.10),
+                    "initial_offset_rad": 0.08,
+                    "all_max_xy_error": max(row["xy_error"] for row in estimates),
+                    "all_max_yaw_error": max(row["yaw_error"] for row in estimates),
+                    "ready_max_xy_error": max(row["xy_error"] for row in localized),
+                    "ready_max_yaw_error": max(row["yaw_error"] for row in localized),
+                    "final_xy_error": estimates[-1]["xy_error"],
+                    "final_yaw_error": estimates[-1]["yaw_error"],
+                }
+            if args.view and not user_closed:
+                print(
+                    f"{terminal}: robot stopped. Close the MuJoCo window to exit.",
+                    flush=True,
+                )
+                wait_until(
+                    window_closed,
+                    math.inf,
+                    "MuJoCo window closure",
+                    processes,
+                    allow_navigator_exit=True,
+                )
+            if args.view:
+                outcome["closed_by_user"] = True
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - Save failed runs.
         failure = error
     finally:
@@ -395,6 +473,116 @@ def run_case(args, case, domain):
     print(json.dumps(outcome))
 
 
+def run_session(args, processes, source, telemetry, window_closed):
+    directory = processes.directory
+    wait_until(
+        lambda: "WAITING_FOR_NAV2" in (directory / "navigator.log").read_text(),
+        5,
+        "navigator signal readiness",
+        processes,
+    )
+    if args.gui:
+        config = directory / "navigation.rviz"
+        shutil.copyfile(source / "navigation.rviz", config)
+        processes.start(
+            "rviz",
+            [
+                shutil.which("rviz2"),
+                "-d",
+                str(config),
+                "--ros-args",
+                "-p",
+                "use_sim_time:=true",
+            ],
+        )
+        processes.start("controls", [str(args.ros_python), str(source / "controls.py")])
+        print(
+            "在 RViz 选择 2D Goal Pose 设置目标；控制窗可取消或结束仿真。", flush=True
+        )
+    else:
+        processes.start(
+            "check", [str(args.ros_python), str(source / "session_check.py")]
+        )
+    deadline = math.inf if args.gui else time.monotonic() + 140
+    closed = False
+    cursor = RecordsCursor(telemetry)
+    try:
+        while time.monotonic() < deadline:
+            if any(row["collision"] for row in cursor.take()):
+                raise RuntimeError("robot collided during session")
+            if window_closed():
+                closed = True
+            for name, child in processes.children.items():
+                if child.poll() is None:
+                    continue
+                if name in ("controls", "rviz", "check") and child.returncode == 0:
+                    closed = True
+                else:
+                    raise RuntimeError(
+                        f"{name} exited during session: {child.returncode}"
+                    )
+            if closed:
+                break
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        if not args.gui:
+            raise
+        closed = True
+    if not closed:
+        raise RuntimeError("session check timed out")
+    processes.stop("navigator", timeout=12)
+    output = (directory / "navigator.log").read_text()
+    if processes.children["navigator"].returncode != 0 or "DRAINED" not in output:
+        raise RuntimeError(f"session did not drain: {output}")
+    completed_at = last_record(telemetry)["time"]
+    deadline = time.monotonic() + 5
+    stopped = []
+    while time.monotonic() < deadline:
+        rows = cursor.take()
+        if any(row["collision"] for row in rows):
+            raise RuntimeError("robot collided during shutdown")
+        stopped.extend(row for row in rows if row["time"] > completed_at)
+        stopped = stopped[-3:]
+        if len(stopped) >= 3 and all(
+            abs(row["v"]) < 0.03 and abs(row["w"]) < 0.08 for row in stopped[-3:]
+        ):
+            break
+        if processes.children["bridge"].poll() is not None:
+            raise RuntimeError("bridge exited before physical stop")
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("robot did not stop after session shutdown")
+    if (
+        not args.gui
+        and "SESSION_CHECK_PASSED" not in (directory / "check.log").read_text()
+    ):
+        raise RuntimeError("session check did not pass")
+    final = next(
+        (
+            json.loads(line.removeprefix("SESSION_DRAINED "))
+            for line in output.splitlines()
+            if line.startswith("SESSION_DRAINED ")
+        ),
+        {},
+    )
+    if final.get("active") or final.get("pending"):
+        raise RuntimeError("session left active or queued targets")
+    if (not args.gui or "SESSION_READY" in output) and (
+        not final
+        or final["state"] != "closed"
+        or final["accepted"] != final["started"] + final["superseded"]
+        or final["started"] != final["succeeded"] + final["canceled"] + final["failed"]
+    ):
+        raise RuntimeError("session mission accounting did not balance after shutdown")
+    return {
+        "case": "interactive" if args.gui else "session",
+        "executor": args.executor,
+        "session": final,
+        "final": stopped[-1],
+        "status": "passed",
+    }
+
+
 def interrupted(number, _frame):
     raise KeyboardInterrupt(f"signal {number}")
 
@@ -407,21 +595,35 @@ parser.add_argument("--nav2-prefix", type=Path, required=True)
 parser.add_argument("--logs", type=Path, required=True)
 parser.add_argument("--executor", choices=["single", "multi"], default="single")
 parser.add_argument("--localization", choices=["amcl", "truth"], default="amcl")
+parser.add_argument("--ros-python", type=Path, default=Path("/usr/bin/python3"))
+parser.add_argument(
+    "--gui", action="store_true", help="interactive RViz + Qt controls + MuJoCo"
+)
 parser.add_argument(
     "--view", action="store_true", help="show MuJoCo and keep the window open"
 )
 parser.add_argument(
     "--case",
-    choices=["all", "straight", "obstacle", "cancel", "startup-cancel"],
+    choices=["all", "straight", "obstacle", "cancel", "startup-cancel", "session"],
     default=None,
 )
 parser.add_argument("--domain", type=int, default=220)
 arguments = parser.parse_args()
-selected = arguments.case or ("obstacle" if arguments.view else "all")
+if arguments.gui and arguments.case:
+    parser.error("--gui is an interactive session; omit --case")
+if arguments.gui:
+    if shutil.which("rviz2") is None:
+        parser.error("rviz2 not found; source the ROS environment and install RViz")
+    arguments.view = True
+selected = (
+    "interactive"
+    if arguments.gui
+    else arguments.case or ("obstacle" if arguments.view else "all")
+)
 if arguments.view and selected == "all":
     parser.error("--view runs one case; use --case obstacle or --case straight")
 cases = (
-    ["straight", "obstacle", "cancel", "startup-cancel"]
+    ["straight", "obstacle", "cancel", "startup-cancel", "session"]
     if selected == "all"
     else [selected]
 )

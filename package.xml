@@ -14,6 +14,7 @@
   <test_depend>nav2_msgs</test_depend>
   <test_depend>rosgraph_msgs</test_depend>
   <test_depend>std_msgs</test_depend>
+  <test_depend>rclpy</test_depend>
   <test_depend>tf2_msgs</test_depend>
   <test_depend>sensor_msgs</test_depend>
   <test_depend>nav_msgs</test_depend>

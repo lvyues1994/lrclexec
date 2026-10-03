@@ -5,6 +5,7 @@
 #include <cmath>
 #include <deque>
 #include <fstream>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <iomanip>
@@ -64,6 +65,13 @@ class Bridge {
                     return;
                 command = {message.linear.x, message.angular.z};
                 receivedAt = std::chrono::steady_clock::now();
+            });
+        goal = node.create_subscription<geometry_msgs::msg::PoseStamped>(
+            "navigation/active_goal", rclcpp::QoS{1}.transient_local(),
+            [this](geometry_msgs::msg::PoseStamped const &message) {
+                if (viewer and message.header.frame_id == "map" and std::isfinite(message.pose.position.x) and
+                    std::isfinite(message.pose.position.y))
+                    viewer->setGoal(message.pose.position.x, message.pose.position.y);
             });
         publishMap(node.declare_parameter<bool>("map_includes_obstacle", true));
         auto fixed = tf2_msgs::msg::TFMessage{};
@@ -191,6 +199,7 @@ class Bridge {
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map;
     rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf, staticTf;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr estimate;
     rclcpp::TimerBase::SharedPtr timer;
 };
@@ -216,7 +225,8 @@ int main(int argc, char **argv) {
             viewer =
                 simulation::makeViewer({model, node->declare_parameter<std::string>("viewer_capture", ""),
                                         node->declare_parameter<double>("viewer_target_x", 4.0),
-                                        node->declare_parameter<double>("viewer_target_y", 0.0)});
+                                        node->declare_parameter<double>("viewer_target_y", 0.0),
+                                        node->declare_parameter<bool>("viewer_has_target", true)});
         auto bridge = Bridge{*node, std::move(physics), std::move(viewer)};
         std::unique_ptr<rclcpp::Executor> executor;
         if (mode == "single")

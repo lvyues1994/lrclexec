@@ -180,6 +180,8 @@ LD_LIBRARY_PATH="$NAV2_PREFIX/lib:$LD_LIBRARY_PATH" \
 
 [MuJoCo 差速底盘示例](simulation/mujoco/README.md) 将同一导航逻辑接入真实 Nav2 planner/controller，使用轮子接触动力学、激光和真值里程计完成导航，支持无界面运行和可选原生窗口。可选开关 `LRCLEXEC_BUILD_MUJOCO_SIM=ON` 默认关闭。回归检查直达、激光发现障碍后绕行、运动中取消及启动阶段取消，并核对物理停稳和进程正常退出；构建和运行步骤见示例说明。
 
+仿真入口的 `--gui` 联合启动 RViz、Qt 导航控制窗和 MuJoCo。它支持在同一会话中点选目标、取消、替换和失败后重发；新任务在旧任务排空后启动。持续会话通过标准 Single/Multi executor 验证，GUI 配置随源码保存。
+
 回归覆盖定时器到期/取消竞争、接受前取消、取消被拒后成功、远端暂不返回终态时 join 等待、feedback 异常及完成竞态、拒绝与 abort 载荷、超时分支排空、投递失败和恢复回调重入 ROS 客户端、独占资源析构、等待目标覆盖/取消、服务端关闭及 scope join。Service 回归检查取消、超时、迟到响应和 pending request 清理；ROS 时间回归检查暂停、前后跳变及暂停时取消。还检查正常退出与重复信号、移动安装目录、外部 lexec provider、重复及兄弟目录 `find_package`。Nav2 回归执行至少 300 轮跟随，检查控制器峰值为 1、客户端路径资源有界，以及初次规划、等待重规划、重规划进行中的取消。终态在 ROS 中异步传输，成功返回前可能已接受下一次规划，因此计划数可以略多于跟随次数。
 
 Topic 回归分别使用单线程、四线程及 EventsExecutor，并检查普通 DDS 与进程内通信、首条消息、独立订阅、取消/超时、晚到闭包、创建/投递异常、transient-local/SensorDataQoS，以及借用消息在回调结束后的所有权。LifecycleNode 回归检查完整节点的所有权、各生命周期状态下的通信、取消清理及标准 executor 下的 ROS 时钟；EventsExecutor 额外检查队列注册/重新注册、批内异常恢复、Service 迟到响应、scope 异步清理及重复信号退出。安装消费回归包含独立 LifecycleNode 应用。
