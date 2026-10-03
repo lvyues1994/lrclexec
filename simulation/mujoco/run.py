@@ -1,4 +1,4 @@
-"""Run MuJoCo/Nav2 navigation, optionally showing the native MuJoCo window."""
+"""Run MuJoCo/Nav2 navigation with an optional integrated Qt workbench."""
 
 import argparse
 import json
@@ -189,6 +189,12 @@ def run_case(args, case, domain):
             environment.get("LD_LIBRARY_PATH", ""),
         ]
     )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [
+            *(str(path) for path in sorted(prefix.glob("lib/python*/site-packages"))),
+            environment.get("PYTHONPATH", ""),
+        ]
+    )
     processes = Processes(directory, environment)
     source = Path(__file__).resolve().parent
     executables = args.build.resolve() / "simulation/mujoco"
@@ -196,12 +202,25 @@ def run_case(args, case, domain):
     failure = None
     user_closed = False
     target = 1.0 if case == "straight" else 4.0
-    session = case in ("session", "interactive")
+    session = case in ("session", "workbench", "interactive")
 
     def window_closed():
         return args.view and bool(last_record(telemetry).get("viewer_closed", False))
 
     try:
+        if case == "workbench":
+            with (directory / "preflight.log").open("w") as log:
+                subprocess.run(
+                    [
+                        str(args.ros_python),
+                        "-c",
+                        "from nav2_msgs.srv import GetCostmap",
+                    ],
+                    env=environment,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=True,
+                )
         bridge_args = [
             str(executables / "mujoco_bridge"),
             "--ros-args",
@@ -272,7 +291,9 @@ def run_case(args, case, domain):
             ],
         )
         if session:
-            outcome = run_session(args, processes, source, telemetry, window_closed)
+            outcome = run_session(
+                args, processes, source, telemetry, window_closed, case
+            )
         else:
             if case == "startup-cancel":
                 wait_until(
@@ -473,7 +494,7 @@ def run_case(args, case, domain):
     print(json.dumps(outcome))
 
 
-def run_session(args, processes, source, telemetry, window_closed):
+def run_session(args, processes, source, telemetry, window_closed, case):
     directory = processes.directory
     wait_until(
         lambda: "WAITING_FOR_NAV2" in (directory / "navigator.log").read_text(),
@@ -482,28 +503,61 @@ def run_session(args, processes, source, telemetry, window_closed):
         processes,
     )
     if args.gui:
-        config = directory / "navigation.rviz"
-        shutil.copyfile(source / "navigation.rviz", config)
-        processes.start(
-            "rviz",
+        if args.rviz:
+            config = directory / "navigation.rviz"
+            shutil.copyfile(source / "navigation.rviz", config)
+            processes.start(
+                "rviz",
+                [
+                    shutil.which("rviz2"),
+                    "-d",
+                    str(config),
+                    "--ros-args",
+                    "-p",
+                    "use_sim_time:=true",
+                ],
+            )
+        command = (
             [
-                shutil.which("rviz2"),
-                "-d",
-                str(config),
+                str(
+                    args.build.resolve() / "simulation/mujoco/gui/mujoco_gui_live_test"
+                ),
+                str(source / "scene.xml"),
+                str(directory),
+            ]
+            if args.gui_check
+            else [
+                str(args.build.resolve() / "simulation/mujoco/mujoco_gui"),
                 "--ros-args",
                 "-p",
-                "use_sim_time:=true",
-            ],
+                f"model:={source / 'scene.xml'}",
+            ]
         )
-        processes.start("controls", [str(args.ros_python), str(source / "controls.py")])
+        processes.start("controls", command)
         print(
-            "在 RViz 选择 2D Goal Pose 设置目标；控制窗可取消或结束仿真。", flush=True
+            "Qt / MuJoCo 工作台已启动；在窗口内编辑任务点和障碍物，关闭窗口结束仿真。",
+            flush=True,
         )
     else:
         processes.start(
-            "check", [str(args.ros_python), str(source / "session_check.py")]
+            "check",
+            [
+                str(args.ros_python),
+                str(
+                    source
+                    / (
+                        "workbench_check.py"
+                        if case == "workbench"
+                        else "session_check.py"
+                    )
+                ),
+            ],
         )
-    deadline = math.inf if args.gui else time.monotonic() + 140
+    deadline = (
+        math.inf
+        if args.gui and not args.gui_check
+        else time.monotonic() + (220 if case == "workbench" else 140)
+    )
     closed = False
     cursor = RecordsCursor(telemetry)
     try:
@@ -557,6 +611,11 @@ def run_session(args, processes, source, telemetry, window_closed):
         and "SESSION_CHECK_PASSED" not in (directory / "check.log").read_text()
     ):
         raise RuntimeError("session check did not pass")
+    if (
+        args.gui_check
+        and "GUI_CHECK_PASSED" not in (directory / "controls.log").read_text()
+    ):
+        raise RuntimeError("GUI check did not pass")
     final = next(
         (
             json.loads(line.removeprefix("SESSION_DRAINED "))
@@ -575,7 +634,7 @@ def run_session(args, processes, source, telemetry, window_closed):
     ):
         raise RuntimeError("session mission accounting did not balance after shutdown")
     return {
-        "case": "interactive" if args.gui else "session",
+        "case": case,
         "executor": args.executor,
         "session": final,
         "final": stopped[-1],
@@ -597,14 +656,30 @@ parser.add_argument("--executor", choices=["single", "multi"], default="single")
 parser.add_argument("--localization", choices=["amcl", "truth"], default="amcl")
 parser.add_argument("--ros-python", type=Path, default=Path("/usr/bin/python3"))
 parser.add_argument(
-    "--gui", action="store_true", help="interactive RViz + Qt controls + MuJoCo"
+    "--gui", action="store_true", help="integrated Qt / MuJoCo workbench"
+)
+parser.add_argument(
+    "--rviz", action="store_true", help="also launch RViz with --gui (default: off)"
+)
+parser.add_argument(
+    "--gui-check",
+    action="store_true",
+    help="exercise Qt controls against real Nav2 (requires --gui and a display)",
 )
 parser.add_argument(
     "--view", action="store_true", help="show MuJoCo and keep the window open"
 )
 parser.add_argument(
     "--case",
-    choices=["all", "straight", "obstacle", "cancel", "startup-cancel", "session"],
+    choices=[
+        "all",
+        "straight",
+        "obstacle",
+        "cancel",
+        "startup-cancel",
+        "session",
+        "workbench",
+    ],
     default=None,
 )
 parser.add_argument("--domain", type=int, default=220)
@@ -612,9 +687,19 @@ arguments = parser.parse_args()
 if arguments.gui and arguments.case:
     parser.error("--gui is an interactive session; omit --case")
 if arguments.gui:
-    if shutil.which("rviz2") is None:
+    if arguments.view:
+        parser.error("--gui embeds MuJoCo; omit the separate --view window")
+    if not (arguments.build / "simulation/mujoco/mujoco_gui").is_file():
+        parser.error("mujoco_gui not built; configure with LRCLEXEC_MUJOCO_QT=ON")
+    if arguments.rviz and shutil.which("rviz2") is None:
         parser.error("rviz2 not found; source the ROS environment and install RViz")
-    arguments.view = True
+elif arguments.rviz:
+    parser.error("--rviz requires --gui")
+if arguments.gui_check:
+    if not arguments.gui:
+        parser.error("--gui-check requires --gui")
+    if not (arguments.build / "simulation/mujoco/gui/mujoco_gui_live_test").is_file():
+        parser.error("GUI test not built; enable LRCLEXEC_BUILD_TESTS")
 selected = (
     "interactive"
     if arguments.gui
@@ -623,7 +708,7 @@ selected = (
 if arguments.view and selected == "all":
     parser.error("--view runs one case; use --case obstacle or --case straight")
 cases = (
-    ["straight", "obstacle", "cancel", "startup-cancel", "session"]
+    ["straight", "obstacle", "cancel", "startup-cancel", "session", "workbench"]
     if selected == "all"
     else [selected]
 )

@@ -41,11 +41,20 @@ find_package(nav_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+option(LRCLEXEC_MUJOCO_QT "Build the integrated Qt MuJoCo workbench" OFF)
+if(LRCLEXEC_MUJOCO_QT)
+    add_subdirectory(gui)
+endif()
 add_executable(mujoco_bridge bridge.cpp)
+add_library(mujoco_scene_protocol OBJECT SceneProtocol.cpp)
+target_link_libraries(mujoco_scene_protocol PUBLIC mujoco_physics
+    visualization_msgs::visualization_msgs__rosidl_typesupport_cpp)
 target_link_libraries(mujoco_bridge PRIVATE mujoco_physics mujoco_viewer lrclexec::lrclexec
     rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp tf2_msgs::tf2_msgs__rosidl_typesupport_cpp
-    sensor_msgs::sensor_msgs__rosidl_typesupport_cpp nav_msgs::nav_msgs__rosidl_typesupport_cpp)
+    sensor_msgs::sensor_msgs__rosidl_typesupport_cpp nav_msgs::nav_msgs__rosidl_typesupport_cpp
+    mujoco_scene_protocol std_msgs::std_msgs__rosidl_typesupport_cpp)
 add_library(mujoco_goal_inbox OBJECT GoalInbox.cpp)
 target_link_libraries(mujoco_goal_inbox PUBLIC lrclexec::lrclexec
     geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
@@ -73,13 +82,16 @@ if(LRCLEXEC_BUILD_TESTS)
     if(LRCLEXEC_NAV2_RUNTIME_PREFIX)
         find_program(UV_EXECUTABLE uv REQUIRED)
         foreach(mode IN ITEMS single multi)
-            foreach(case IN ITEMS straight obstacle cancel startup-cancel session)
+            foreach(case IN ITEMS straight obstacle cancel startup-cancel session workbench)
                 add_test(NAME mujoco_nav2_${mode}_${case} COMMAND ${UV_EXECUTABLE} run --no-project --no-managed-python
                     ${CMAKE_CURRENT_SOURCE_DIR}/run.py --build ${PROJECT_BINARY_DIR}
                     --nav2-prefix ${LRCLEXEC_NAV2_RUNTIME_PREFIX}
                     --logs ${PROJECT_BINARY_DIR}/mujoco-runs/${mode}/amcl --executor ${mode} --case ${case})
                 set_tests_properties(mujoco_nav2_${mode}_${case} PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
                     ENVIRONMENT "UV_CACHE_DIR=/tmp/lrclexec-uv-cache")
+                if(case STREQUAL "workbench")
+                    set_tests_properties(mujoco_nav2_${mode}_${case} PROPERTIES TIMEOUT 280)
+                endif()
                 if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
                     set_tests_properties(mujoco_nav2_${mode}_${case} PROPERTIES
                         TIMEOUT_SIGNAL_NAME SIGINT TIMEOUT_SIGNAL_GRACE_PERIOD 60)

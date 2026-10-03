@@ -84,6 +84,7 @@ struct ViewerImpl final : Viewer {
             throw std::bad_alloc{};
         mjv_defaultCamera(&camera);
         mjv_defaultOption(&options);
+        options.geomgroup[3] = 1;
         camera.lookat[0] = 2;
         camera.distance = 9;
         camera.azimuth = 90;
@@ -127,9 +128,11 @@ struct ViewerImpl final : Viewer {
             glfwHideWindow(window.get());
             return false;
         }
-        if (state.positions.size() != static_cast<std::size_t>(model->nq))
+        if (state.positions.size() != static_cast<std::size_t>(model->nq) or
+            state.mocapPositions.size() != static_cast<std::size_t>(3 * model->nmocap))
             throw std::invalid_argument{"viewer/physics model state mismatch"};
         std::copy(state.positions.begin(), state.positions.end(), data->qpos);
+        std::copy(state.mocapPositions.begin(), state.mocapPositions.end(), data->mocap_pos);
         data->time = state.time;
         mj_forward(model.get(), data.get());
         auto viewport = mjrRect{0, 0, 0, 0};

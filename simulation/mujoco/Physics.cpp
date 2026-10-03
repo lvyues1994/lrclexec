@@ -47,6 +47,13 @@ struct PhysicsImpl final : Physics {
                 model->body_pos[3 * id(mjOBJ_BODY, "right_wheel") + 1];
         if (radius <= 0 or track <= 0 or std::abs(model->opt.timestep - .002) > 1e-9)
             throw std::runtime_error{"invalid differential-drive model geometry/timestep"};
+        if (model->nmocap != obstacleCapacity)
+            throw std::runtime_error{"expected 16 dynamic obstacle slots"};
+        for (std::size_t slot = 0; slot < obstacleCapacity; ++slot) {
+            auto const name = "dynamic_box_" + std::to_string(slot);
+            if (model->body_mocapid[id(mjOBJ_BODY, name.c_str())] != static_cast<int>(slot))
+                throw std::runtime_error{"obstacle slot/model order mismatch"};
+        }
         mj_forward(model.get(), data.get());
     }
     int id(mjtObj type, char const *name) const {
@@ -97,13 +104,51 @@ struct PhysicsImpl final : Physics {
                 {velocity[3], velocity[2]},
                 obstacleContact};
     }
-    SceneState scene() const override { return {{data->qpos, data->qpos + model->nq}, data->time}; }
+    SceneState scene() const override {
+        return {{data->qpos, data->qpos + model->nq},
+                data->time,
+                {data->mocap_pos, data->mocap_pos + 3 * model->nmocap},
+                revision};
+    }
+    EditResult editObstacle(ObstacleEdit const &edit) override {
+        auto reject = [&](char const *reason) { return EditResult{false, revision, reason}; };
+        if (edit.slot >= obstacleCapacity or not std::isfinite(edit.x) or not std::isfinite(edit.y))
+            return reject("Invalid obstacle slot or coordinates");
+        if (edit.active) {
+            if (edit.x - obstacleLength / 2 <= -1.95 or edit.x + obstacleLength / 2 >= 5.95 or
+                edit.y - obstacleWidth / 2 <= -2.95 or edit.y + obstacleWidth / 2 >= 2.95)
+                return reject("Obstacle must be inside the room");
+            auto const robot = state();
+            auto const dx = std::max(std::abs(edit.x - robot.x) - obstacleLength / 2, 0.0);
+            auto const dy = std::max(std::abs(edit.y - robot.y) - obstacleWidth / 2, 0.0);
+            if (std::hypot(dx, dy) <= .32)
+                return reject("Obstacle overlaps the robot safety footprint");
+            for (int geom = 0; geom < model->ngeom; ++geom) {
+                auto const mocap = model->body_mocapid[model->geom_bodyid[geom]];
+                if (model->geom_type[geom] != mjGEOM_BOX or model->geom_group[geom] == 1 or
+                    mocap == static_cast<int>(edit.slot) or
+                    (mocap >= 0 and data->mocap_pos[3 * mocap + 2] < 0))
+                    continue;
+                auto const *pos = data->geom_xpos + 3 * geom;
+                auto const *size = model->geom_size + 3 * geom;
+                if (std::abs(edit.x - pos[0]) <= obstacleLength / 2 + size[0] + .02 and
+                    std::abs(edit.y - pos[1]) <= obstacleWidth / 2 + size[1] + .02)
+                    return reject("Obstacle overlaps a wall or another box");
+            }
+        }
+        auto *pos = data->mocap_pos + 3 * edit.slot;
+        pos[0] = edit.active ? edit.x : 0;
+        pos[1] = edit.active ? edit.y : 0;
+        pos[2] = edit.active ? obstacleHeight / 2 : -10;
+        mj_forward(model.get(), data.get());
+        return {true, ++revision, {}};
+    }
     Scan scan() const override {
         auto scan =
             Scan{std::vector<float>(360), static_cast<float>(-pi), static_cast<float>(2 * pi / 360), 8.f};
         auto const *origin = data->site_xpos + 3 * laser;
         auto const *rotation = data->site_xmat + 9 * laser;
-        auto const groups = std::array<mjtByte, mjNGROUP>{1, 0, 1, 0, 0, 0};
+        auto const groups = std::array<mjtByte, mjNGROUP>{1, 0, 1, 1, 0, 0};
         for (std::size_t i = 0; i < scan.ranges.size(); ++i) {
             auto const angle = scan.angleMin + static_cast<double>(i) * scan.angleStep;
             auto const x = std::cos(angle), y = std::sin(angle);
@@ -126,6 +171,7 @@ struct PhysicsImpl final : Physics {
                 auto const y = map.originY + (row + .5) * map.resolution;
                 for (int geom = 0; geom < model->ngeom; ++geom) {
                     if (model->geom_type[geom] != mjGEOM_BOX or model->geom_group[geom] == 1 or
+                        model->body_mocapid[model->geom_bodyid[geom]] >= 0 or
                         (not includeObstacle and model->geom_group[geom] == 2))
                         continue;
                     auto const *position = data->geom_xpos + 3 * geom;
@@ -143,6 +189,7 @@ struct PhysicsImpl final : Physics {
     int base = -1, laser = -1, left = -1, right = -1;
     double radius = 0, track = 0;
     bool obstacleContact = false;
+    std::uint64_t revision = 0;
 };
 } // namespace
 

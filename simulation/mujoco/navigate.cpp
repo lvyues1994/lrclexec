@@ -164,10 +164,31 @@ int main(int argc, char **argv) {
                                                                            rclcpp::QoS{1}.transient_local());
         auto activeGoal = node->create_publisher<geometry_msgs::msg::PoseStamped>(
             "navigation/active_goal", rclcpp::QoS{1}.transient_local());
+        auto activeRoute = node->create_publisher<geometry_msgs::msg::PoseArray>(
+            "navigation/active_route", rclcpp::QoS{1}.transient_local());
+        auto path =
+            node->create_publisher<nav_msgs::msg::Path>("navigation/path", rclcpp::QoS{1}.transient_local());
+        auto routeResult = node->create_publisher<std_msgs::msg::String>("navigation/route_result", 16);
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goals;
+        rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr routes;
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel;
         rclcpp::TimerBase::SharedPtr statusTimer;
         if (interactive) {
+            routes = node->create_subscription<geometry_msgs::msg::PoseArray>(
+                "navigation/route", rclcpp::QoS{1}, [&](geometry_msgs::msg::PoseArray message) {
+                    auto const request = message.header.stamp;
+                    message.header.stamp = node->now();
+                    auto const accepted = inbox.submit(std::move(message));
+                    auto response = std_msgs::msg::String{};
+                    response.data = "{\"request_sec\":" + std::to_string(request.sec) +
+                                    ",\"request_nanosec\":" + std::to_string(request.nanosec) +
+                                    ",\"accepted\":" + (accepted ? "true" : "false") +
+                                    ",\"status\":" + simulation::statusJson(inbox.status()) + "}";
+                    routeResult->publish(response);
+                    if (not accepted)
+                        RCLCPP_WARN(node->get_logger(),
+                                    "Route rejected: session not ready or invalid map poses");
+                });
             goals = node->create_subscription<geometry_msgs::msg::PoseStamped>(
                 "goal_pose", rclcpp::QoS{1}, [&](geometry_msgs::msg::PoseStamped message) {
                     message.header.stamp = node->now();
@@ -238,7 +259,10 @@ int main(int argc, char **argv) {
         resources.replanInterval = 1s;
         auto planCount = 0;
         auto progressCount = 0;
-        resources.pathReady = [&](auto const &) { ++planCount; };
+        resources.pathReady = [&](auto const &message) {
+            ++planCount;
+            path->publish(message->path);
+        };
         resources.progress = [&](auto const &) { ++progressCount; };
         if (interactive) {
             inbox.ready();
@@ -247,14 +271,31 @@ int main(int argc, char **argv) {
                 auto outcome = simulation::GoalOutcome::failed;
                 auto message = std::string{};
                 try {
-                    activeGoal->publish(goal->pose);
+                    auto route = geometry_msgs::msg::PoseArray{};
+                    route.header = goal->poses.front().header;
+                    for (auto const &pose : goal->poses)
+                        route.poses.push_back(pose.pose);
+                    activeRoute->publish(route);
                     // This main thread is the sole consumer. sync_wait destroys
                     // its operation before complete() allows the next target.
-                    auto result = lexec::sync_wait(
-                        lexec::write_env(lexec::coro::as_sender(navigation::navigate(resources, goal->pose)),
-                                         lexec::prop{lexec::get_stop_token, goal->stop->get_token()}));
-                    outcome = result ? simulation::GoalOutcome::succeeded : simulation::GoalOutcome::canceled;
+                    outcome = simulation::GoalOutcome::canceled;
+                    for (std::size_t index = 0; index < goal->poses.size(); ++index) {
+                        if (not inbox.beginWaypoint(goal->id, index))
+                            break;
+                        auto &pose = goal->poses[index];
+                        pose.header.stamp = node->now();
+                        activeGoal->publish(pose);
+                        auto result = lexec::sync_wait(
+                            lexec::write_env(lexec::coro::as_sender(navigation::navigate(resources, pose)),
+                                             lexec::prop{lexec::get_stop_token, goal->stop->get_token()}));
+                        if (not result)
+                            break;
+                        inbox.reachedWaypoint(goal->id);
+                        if (index + 1 == goal->poses.size())
+                            outcome = simulation::GoalOutcome::succeeded;
+                    }
                 } catch (navigation::NavigationError const &error) {
+                    outcome = simulation::GoalOutcome::failed;
                     message = error.failure.phase == navigation::Phase::planning ? "Planning failed"
                                                                                  : "Following failed";
                     if (error.failure.code)
@@ -263,10 +304,14 @@ int main(int argc, char **argv) {
                         message += ": " + error.failure.message;
                     std::cerr << "navigation failed: " << message << '\n';
                 } catch (std::exception const &error) {
+                    outcome = simulation::GoalOutcome::failed;
                     message = error.what();
                     std::cerr << "navigation failed: " << message << '\n';
                 }
                 inbox.complete(goal->id, outcome, std::move(message));
+                auto emptyPath = nav_msgs::msg::Path{};
+                emptyPath.header.frame_id = "map";
+                path->publish(emptyPath);
             }
             spinner.stop();
             std::cout << "SESSION_DRAINED " << simulation::statusJson(inbox.status()) << '\n'

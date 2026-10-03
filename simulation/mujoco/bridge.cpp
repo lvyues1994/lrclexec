@@ -1,4 +1,5 @@
 #include "Physics.h"
+#include "SceneProtocol.h"
 #include "Viewer.h"
 #include <algorithm>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
 using namespace std::chrono_literals;
@@ -59,6 +61,18 @@ class Bridge {
         staticTf =
             node.create_publisher<tf2_msgs::msg::TFMessage>("tf_static", rclcpp::QoS{1}.transient_local());
         map = node.create_publisher<nav_msgs::msg::OccupancyGrid>("map", rclcpp::QoS{1}.transient_local());
+        scene = node.create_publisher<std_msgs::msg::String>("simulation/scene",
+                                                             rclcpp::QoS{1}.transient_local());
+        editResult = node.create_publisher<std_msgs::msg::String>("simulation/edit_result", 32);
+        edits = node.create_subscription<visualization_msgs::msg::Marker>(
+            "simulation/edit_obstacle", 32, [this](visualization_msgs::msg::Marker const &message) {
+                if (pendingEdits.size() >= 32) {
+                    publishEdit(message,
+                                {false, physics->scene().revision, "Obstacle command queue is full"});
+                    return;
+                }
+                pendingEdits.push_back(message);
+            });
         velocity = node.create_subscription<geometry_msgs::msg::Twist>(
             "cmd_vel", 10, [this](geometry_msgs::msg::Twist const &message) {
                 if (not std::isfinite(message.linear.x) or not std::isfinite(message.angular.z))
@@ -92,6 +106,21 @@ class Bridge {
     }
 
   private:
+    void publishEdit(visualization_msgs::msg::Marker const &request, simulation::EditResult const &result) {
+        auto message = std_msgs::msg::String{};
+        message.data = simulation::editJson(request, result);
+        editResult->publish(message);
+    }
+    void applyEdits() {
+        for (auto const &request : pendingEdits) {
+            auto const parsed = simulation::parseEdit(request);
+            auto const result = parsed.edit
+                                    ? physics->editObstacle(*parsed.edit)
+                                    : simulation::EditResult{false, physics->scene().revision, parsed.reason};
+            publishEdit(request, result);
+        }
+        pendingEdits.clear();
+    }
     void score(geometry_msgs::msg::PoseWithCovarianceStamped const &message) {
         auto const stamp = rclcpp::Time{message.header.stamp}.nanoseconds();
         auto const sample = std::lower_bound(history.begin(), history.end(), stamp,
@@ -128,6 +157,7 @@ class Bridge {
         map->publish(message);
     }
     void tick() {
+        applyEdits();
         auto effective = command;
         if (std::chrono::steady_clock::now() - receivedAt > 300ms)
             effective = {};
@@ -176,6 +206,11 @@ class Bridge {
         }
         if (viewer and not viewerClosed and ticks % 3 == 0)
             viewerClosed = not viewer->present(physics->scene());
+        if (ticks % 3 == 0) {
+            auto message = std_msgs::msg::String{};
+            message.data = simulation::sceneJson(physics->scene());
+            scene->publish(message);
+        }
         if (ticks % 20 == 0)
             telemetry << "{\"time\":" << state.time << ",\"x\":" << state.x << ",\"y\":" << state.y
                       << ",\"yaw\":" << state.yaw << ",\"v\":" << state.velocity.forward
@@ -189,6 +224,7 @@ class Bridge {
     std::ofstream localization;
     std::deque<std::pair<std::int64_t, simulation::State>> history;
     std::unique_ptr<simulation::Viewer> viewer;
+    std::deque<visualization_msgs::msg::Marker> pendingEdits;
     bool viewerClosed = false;
     simulation::Velocity command;
     std::chrono::steady_clock::time_point receivedAt{};
@@ -197,6 +233,8 @@ class Bridge {
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom;
     rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr scene, editResult;
+    rclcpp::Subscription<visualization_msgs::msg::Marker>::SharedPtr edits;
     rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf, staticTf;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal;

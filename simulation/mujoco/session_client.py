@@ -1,10 +1,10 @@
-"""ROS boundary shared by the Qt controls and the headless session check."""
+"""ROS boundary shared by the headless session and workbench checks."""
 
 import json
 import math
 import time
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
@@ -17,6 +17,7 @@ class SessionClient(Node):
         self.status = {}
         self.updated_at = 0.0
         self.goals = self.create_publisher(PoseStamped, "goal_pose", 10)
+        self.routes = self.create_publisher(PoseArray, "navigation/route", 1)
         self.cancel = self.create_client(Trigger, "navigation/cancel")
         self.subscription = self.create_subscription(
             String,
@@ -41,3 +42,16 @@ class SessionClient(Node):
 
     def request_cancel(self):
         return self.cancel.call_async(Trigger.Request())
+
+    def send_route(self, points, *, frame="map"):
+        message = PoseArray()
+        message.header.frame_id = frame
+        for x, y, yaw in points:
+            pose = Pose()
+            pose.position.x, pose.position.y = float(x), float(y)
+            pose.orientation.z, pose.orientation.w = (
+                math.sin(yaw / 2),
+                math.cos(yaw / 2),
+            )
+            message.poses.append(pose)
+        self.routes.publish(message)

@@ -56,27 +56,48 @@ UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
 
 渲染在主线程读取物理状态快照，使用独立 MuJoCo Data；窗口交互只改变相机。GLFW/MuJoCo GPU 资源在窗口销毁前释放。可视化回归日志中另存最新的 `viewer.ppm` 画面。本机窗口验证使用 X11 `DISPLAY=:1`、GLFW 3.3.10。
 
-## RViz 交互导航
+## Qt / MuJoCo 交互工作台
 
-启用上面的 MuJoCo 窗口构建后，用同一入口打开 RViz、Qt 控制窗和仿真：
+工作台将 MuJoCo 嵌入一个 Qt 主窗口。需要 Qt 5.15 的 Gui、Widgets 开发包；启用测试时还需要 Qt Test。它使用 C++，不依赖 PyQt 或 GLFW。完成基础构建配置后：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+cmake --preset debug -DLRCLEXEC_MUJOCO_QT=ON
+cmake --build --preset debug -j3
 UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
   simulation/mujoco/run.py --build build/debug \
   --nav2-prefix build/nav2/root/opt/ros/jazzy \
   --logs build/mujoco-runs/interactive --executor multi --gui
 ```
 
-GUI 额外需要 `rviz2`、`rclpy`、`python_qt_binding` 和 PyQt5。本机已经安装；控制窗默认使用 `/usr/bin/python3`，可用 `--ros-python` 指定具有这些模块的 Python。配置文件 `navigation.rviz` 随源码保存，每次启动复制到日志目录，RViz 保存视图不会覆盖源码配置。
+默认不启动 RViz；需要查看地图、激光和代价地图时添加 `--rviz`。RViz 使用随源码保存的 `navigation.rviz`，每次复制到日志目录，保存视图不会覆盖源码。`--gui` 与独立 GLFW 窗口的 `--view` 互斥；工作台在 Single/Multi 下都使用所选的桥和导航 executor。
 
-等待控制窗显示“就绪”，在 RViz 工具栏选择 **2D Goal Pose**，在地图上按住并拖动，设置目的地和最终朝向。地图、激光、代价地图、规划路径与最后启动的目标会同时显示；MuJoCo 的绿色标记也跟随最后启动的目标。到达后会话保持运行，可以继续设置目标。
+左侧管理任务点顺序和场景障碍物，中间显示 MuJoCo，右侧编辑所选对象。点击“＋ 任务点”后，在俯视场景点击位置，或输入 X/Y/朝向，再应用修改；上移、下移和删除改变任务草稿。蓝色箭头表示每点最终朝向，蓝色虚线只表示任务顺序，绿色实线表示 Nav2 实际规划路径。3D 观察支持左拖旋转、右拖平移和滚轮缩放。
 
-运动中再次点选会请求停止旧任务；完整排空后才启动最新等待目标。控制窗的“取消当前目标”会清空等待目标并请求停止当前任务，取消应答不代表已经停稳。成功、取消或规划失败后均可重新发送目标。关闭任一窗口或点击“结束仿真”，入口先排空导航、检查物理停稳，再关闭其余进程。
+“开始任务”按顺序逐点到达，最多 64 点；执行时锁定任务点。“停止任务”清空等待任务并取消当前导航，草稿保留，排空后可编辑重发。任一点失败会停止后续点，可重试原任务的剩余点。取消应答不代表物理已经停稳。关闭工作台或可选 RViz 窗口，入口先排空导航、检查停稳，再关闭其余进程。
 
-输入是 RViz 标准 `/goal_pose`（`geometry_msgs/PoseStamped`）；仅接受 `map` 坐标系中有限的平面位姿，非零航向四元数会归一化。初始化完成前拒收目标。`/navigation/cancel` 使用 `std_srvs/Trigger`，`/navigation/status` 发布 JSON 状态和目标编号，`/navigation/active_goal` 发布最后启动的目标。当前入口直接组合 planner/controller，不提供 `NavigateToPose` Action 或 BT navigator。
+“＋ 障碍物”添加固定 0.8 × 0.6 × 0.6 m 的轴对齐箱体，最多 16 个；也可选择已有动态箱体修改 X/Y 或删除。导航中仍可操作。半透明预览不参与物理，只有物理端确认且场景同步后才显示为已应用。越界、与机器人、墙或其他箱体重叠的修改会被拒绝并保留预览；等待确认时锁定对象选择。原有墙体和静态箱体不可编辑。
 
-会话仅保留当前任务和最新等待目标。executor 回调只入队或请求停止，主线程等待导航 sender 完成并销毁 operation 后才交接下一目标；原有单目标模式保持默认。远端不返回 Action 终态时仍可能无法完成排空，入口的强制回收会记录为失败。
+动态箱体同时进入物理碰撞、激光与渲染，不写入静态地图、不重置机器人；Nav2 通过激光更新代价地图并重规划。移走或删除箱体后，激光清除相应代价，清除存在扫描和代价地图更新延迟。退出不保存任务草稿或箱体布局。
+
+### 会话接口
+
+这些接口用于本仓库的仿真程序，不属于通用库安装导出：
+
+| 接口 | 消息和语义 |
+| --- | --- |
+| `/navigation/route` | `geometry_msgs/PoseArray`，整个顺序任务一次验证并入队 |
+| `/navigation/route_result` | `std_msgs/String` JSON，回显请求 stamp、accepted 和会话状态；Qt 据此关联自己的提交 |
+| `/goal_pose` | RViz 标准 `geometry_msgs/PoseStamped`，视为单点任务；新任务请求取消旧任务，排空后启动最新等待任务 |
+| `/navigation/cancel` | `std_srvs/Trigger`，取消当前及等待任务 |
+| `/navigation/status` | JSON 状态和任务计数，包含当前点、总点数和已完成点数 |
+| `/navigation/active_route`、`/navigation/active_goal` | 最后启动的任务快照与当前目标，transient-local |
+| `/navigation/path` | `nav_msgs/Path`，当前实际规划路径，任务结束时清空 |
+| `/simulation/edit_obstacle` | `visualization_msgs/Marker`，map 坐标系，id 0–15，ADD 为固定尺寸 CUBE，DELETE 删除；ns 和 stamp 关联请求 |
+| `/simulation/edit_result` | JSON 回显 client、request_sec/nanosec、slot、applied、revision 和 reason |
+| `/simulation/scene` | JSON 物理快照，version、time、revision、qpos 和 mocap_pos，约 33 Hz、transient-local |
+
+目标仅接受 `map` 中有限的平面位姿，非零航向四元数会归一化；初始化完成前拒收。回调只入队或请求停止，主线程等待 sender 完成并销毁 operation 后才交接下一任务；每次只保留当前任务和最新等待任务。远端不返回 Action 终态时仍可能无法完成排空，入口会将强制回收记录为失败。当前直接组合 planner/controller，不提供 `NavigateToPose` Action 或 BT navigator。
 
 ## 运行和检查
 
@@ -96,6 +117,7 @@ UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
 | `cancel` | 检测到实际运动后向客户端发 SIGINT，等待 STOPPED、排空和停稳 |
 | `startup-cancel` | 不启动 Nav2，在客户端等待生命周期时发 SIGINT，正常退出 |
 | `session` | 连续目标及朝向、取消停稳后重发、非法目标、规划失败恢复、最新目标替换、运动中退出排空 |
+| `workbench` | 三点顺序到达、中途失败停止后续点、导航中添加箱体后绕行、删除后代价清除、多点取消与退出 |
 
 三个运动场景均检查全程无墙体/障碍物碰撞。成功场景还检查物理位置误差小于 0.15 m、航向误差小于 0.18 rad；绕障场景要求侧向位移超过 0.55 m。独立的 `mujoco_physics` 测试检查轮子前进、转向、零速度制动、激光距离和倾斜射线。
 
@@ -113,6 +135,20 @@ UV_CACHE_DIR=/tmp/lrclexec-uv-cache uv run --no-project --no-managed-python \
 
 定位误差评分不参与控制或就绪判断。桥保留最近 20 秒物理历史，按 AMCL 消息的激光时间戳精确匹配，记录估计、真值、误差与协方差。三个运动场景要求就绪后的每个定位样本误差不超过 `0.10 m / 0.10 rad`，同时保留原有物理目标、无碰撞、反馈和排空门槛。结果同时记录初始化全过程最大误差及最后一次定位误差；最后一次定位样本不一定与停稳时间相同。
 
-CTest 持久覆盖 AMCL 四个单目标场景及持续会话 × Single/Multi，以及真值模式直线兼容检查。启动取消不要求 AMCL 样本；持续会话验证交互和任务交接，逐样本 AMCL 误差门槛仍由三个单目标运动场景检查。当前验收仍基于给定静态地图、无噪声激光和真值里程计，不能替代带里程计误差的定位验证。
+CTest 持久覆盖 AMCL 四个单目标场景、持续会话和工作台场景 × Single/Multi，以及真值模式直线兼容检查。启动取消不要求 AMCL 样本；持续会话验证交互和任务交接，逐样本 AMCL 误差门槛仍由三个单目标运动场景检查。当前验收仍基于给定静态地图、无噪声激光和真值里程计，不能替代带里程计误差的定位验证。
 
-2026-10-03 的交互版本验收中，Debug 与 Clang ASan/UBSan 的相关仿真回归各通过 13/13。四组持续会话均验证 FollowPath 活动目标峰值为 1，退出后 active/pending 为零，所有子进程正常退出。结果位于 `build/{debug,asan-clang}/mujoco-runs/{single,multi}/amcl/session/`。另在独立 Xvfb 显示中实际操作 RViz 点选、Qt 取消和结束按钮：一次到达、取消后重发、转向中关闭均完成收束，8 个进程退出码为零；截图和日志位于 `build/acceptance/gui-xvfb/`。
+Qt 控件另有两种检查，需要可用的 X11 显示，可在独立 Xvfb 中执行：
+
+```bash
+mkdir -p build/acceptance/qt-controls
+build/debug/simulation/mujoco/gui/mujoco_gui_test \
+  simulation/mujoco/scene.xml build/acceptance/qt-controls
+# 复用上面的 --gui 命令，添加 --gui-check：真实 Nav2 + Qt 自动交互验收
+# 可同时添加 --rviz；测试退出后，入口继续验证任务排空和物理停稳。
+```
+
+`mujoco_gui_test` 使用真实物理和模拟导航状态，验证控件、重排、重叠拒绝、延迟确认期间的选择锁定和场景拾取，保存常规与最小尺寸截图。`--gui --gui-check` 使用真实 ROS 客户端、物理和 Nav2，通过 Qt 控件发送多点任务并检查最终位置/朝向、箱体添加/移动/删除、取消和任务中关窗；截图保存在该次日志目录。它要求同时启用 `LRCLEXEC_BUILD_TESTS` 和 `LRCLEXEC_MUJOCO_QT`。
+
+`mujoco_gui_client` 不需要显示，使用真实 ROS 通信固定请求关联、取消服务延迟出现，以及场景和编辑回执先后到达的边界。
+
+2026-10-03 工作台验收：Debug 主回归 40/40，加上新增 GUI 协议测试 1/1；Clang ASan/UBSan 下通过物理、任务队列和 GUI 协议三项检查，以及 Single/Multi 的 `workbench` 真实导航场景。Qt 控件检查通过；独立 Xvfb 中的 Single 默认工作台和 Multi 加 `--rviz` 两组真实交互均通过，分别有 7/8 个子进程退出码为零，无强制回收。日志和截图位于 `build/acceptance/qt-workbench/`。预编译 ROS/Nav2/MuJoCo 和系统 Qt 库未重新插桩。

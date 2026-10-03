@@ -1,6 +1,7 @@
 <mujoco model="differential_drive_room">
   <compiler angle="radian"/>
   <option timestep="0.002" integrator="implicitfast" cone="elliptic"/>
+  <statistic center="2 0 0" extent="9"/>
   <default><geom friction="1 0.01 0.001"/>
     <default class="robot"><geom group="1" rgba=".1 .4 .85 1"/></default>
   </default>
@@ -12,6 +13,22 @@
     <geom name="north" type="box" pos="2 3 .5" size="4 .05 .5"/>
     <geom name="south" type="box" pos="2 -3 .5" size="4 .05 .5"/>
     <geom name="obstacle" type="box" group="2" pos="2 0 .4" size=".3 .3 .4" rgba=".95 .45 .12 1"/>
+    <body name="dynamic_box_0" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_1" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_2" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_3" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_4" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_5" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_6" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_7" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_8" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_9" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_10" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_11" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_12" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_13" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_14" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
+    <body name="dynamic_box_15" mocap="true" pos="0 0 -10"><geom type="box" group="3" size=".4 .3 .3" rgba=".95 .55 .18 1"/></body>
     <body name="base_link" pos="0 0 .1" childclass="robot">
       <freejoint name="floating_base"/>
       <geom name="chassis" type="box" size=".18 .13 .045" mass="2"/>

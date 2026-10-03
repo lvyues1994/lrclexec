@@ -36,22 +36,41 @@ void GoalInbox::ready() {
     changed.notify_one();
 }
 bool GoalInbox::submit(geometry_msgs::msg::PoseStamped pose) {
-    auto const valid = normalize(pose);
+    auto route = geometry_msgs::msg::PoseArray{};
+    route.header = std::move(pose.header);
+    route.poses.push_back(std::move(pose.pose));
+    return submit(std::move(route));
+}
+bool GoalInbox::submit(geometry_msgs::msg::PoseArray route) {
+    auto valid = not route.poses.empty() and route.poses.size() <= 64;
+    auto poses = std::vector<geometry_msgs::msg::PoseStamped>{};
+    if (valid) {
+        poses.reserve(route.poses.size());
+        for (auto &source : route.poses) {
+            auto pose = geometry_msgs::msg::PoseStamped{};
+            pose.header = route.header;
+            pose.pose = std::move(source);
+            valid = normalize(pose) and valid;
+            poses.push_back(std::move(pose));
+        }
+    }
     std::shared_ptr<lexec::inplace_stop_source> previous;
     {
         auto lock = std::lock_guard{mutex};
         if (not valid or not state.ready or state.closed) {
             ++state.rejected;
-            state.message = valid ? "Session is not ready" : "Expected a finite planar pose in map";
+            state.message = valid ? "Session is not ready" : "Expected 1..64 finite planar poses in map";
             return false;
         }
         if (pending)
             ++state.superseded;
         pending =
-            SessionGoal{++state.accepted, std::move(pose), std::make_shared<lexec::inplace_stop_source>()};
+            SessionRoute{++state.accepted, std::move(poses), std::make_shared<lexec::inplace_stop_source>()};
         state.pending = pending->id;
         state.message.clear();
         previous = active;
+        if (active)
+            state.stopping = true;
         std::cout << "GOAL_ACCEPTED id=" << pending->id << '\n' << std::flush;
     }
     if (previous)
@@ -70,6 +89,8 @@ bool GoalInbox::cancel() {
         pending.reset();
         state.pending = 0;
         previous = active;
+        if (active)
+            state.stopping = true;
     }
     if (previous)
         previous->request_stop();
@@ -85,12 +106,14 @@ void GoalInbox::close() {
         pending.reset();
         state.pending = 0;
         previous = active;
+        if (active)
+            state.stopping = true;
     }
     if (previous)
         previous->request_stop();
     changed.notify_one();
 }
-std::optional<SessionGoal> GoalInbox::next() {
+std::optional<SessionRoute> GoalInbox::next() {
     auto lock = std::unique_lock{mutex};
     assert(not active);
     changed.wait(lock, [&] { return state.closed or (state.ready and pending); });
@@ -101,12 +124,31 @@ std::optional<SessionGoal> GoalInbox::next() {
     active = result->stop;
     state.active = result->id;
     state.pending = 0;
+    state.stopping = false;
+    state.waypointIndex = state.waypointCompleted = 0;
+    state.waypointCount = result->poses.size();
     state.message.clear();
     ++state.started;
-    std::cout << "GOAL_STARTED id=" << result->id << " x=" << result->pose.pose.position.x
-              << " y=" << result->pose.pose.position.y << '\n'
+    std::cout << "GOAL_STARTED id=" << result->id << " x=" << result->poses.front().pose.position.x
+              << " y=" << result->poses.front().pose.position.y << " points=" << result->poses.size() << '\n'
               << std::flush;
     return result;
+}
+bool GoalInbox::beginWaypoint(std::uint64_t id, std::size_t index) {
+    auto lock = std::lock_guard{mutex};
+    assert(active and state.active == id and index == state.waypointCompleted);
+    if (state.closed or state.stopping or active->stop_requested())
+        return false;
+    assert(index < state.waypointCount);
+    state.waypointIndex = index + 1;
+    std::cout << "WAYPOINT_STARTED task=" << id << " index=" << state.waypointIndex << '\n' << std::flush;
+    return true;
+}
+void GoalInbox::reachedWaypoint(std::uint64_t id) {
+    auto lock = std::lock_guard{mutex};
+    assert(active and state.active == id and state.waypointIndex == state.waypointCompleted + 1);
+    ++state.waypointCompleted;
+    std::cout << "WAYPOINT_REACHED task=" << id << " index=" << state.waypointIndex << '\n' << std::flush;
 }
 void GoalInbox::complete(std::uint64_t id, GoalOutcome outcome, std::string message) {
     auto lock = std::lock_guard{mutex};
@@ -124,13 +166,14 @@ void GoalInbox::complete(std::uint64_t id, GoalOutcome outcome, std::string mess
     state.lastId = id;
     state.message = clean(std::move(message));
     state.active = 0;
+    state.stopping = false;
     active.reset();
     std::cout << "GOAL_DRAINED id=" << id << " result=" << state.lastResult << '\n' << std::flush;
 }
 SessionStatus GoalInbox::status() const {
     auto lock = std::lock_guard{mutex};
     auto result = state;
-    result.stopping = active and active->stop_requested();
+    result.stopping = state.stopping or (active and active->stop_requested());
     return result;
 }
 std::string statusJson(SessionStatus const &s) {
@@ -144,7 +187,8 @@ std::string statusJson(SessionStatus const &s) {
          << ",\"canceled\":" << s.canceled << ",\"failed\":" << s.failed << ",\"superseded\":" << s.superseded
          << ",\"rejected\":" << s.rejected << ",\"last_id\":" << s.lastId
          << ",\"last_result\":" << std::quoted(s.lastResult) << ",\"message\":" << std::quoted(s.message)
-         << "}";
+         << ",\"waypoint_index\":" << s.waypointIndex << ",\"waypoint_count\":" << s.waypointCount
+         << ",\"waypoint_completed\":" << s.waypointCompleted << "}";
     return text.str();
 }
 } // namespace simulation
